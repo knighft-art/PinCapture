@@ -199,6 +199,8 @@ def test_icon_tooltips_include_the_name_and_shortcut(pc, toolbar):
     assert "핀에 그리기" in tips["btn_markup"] and "Ctrl+Alt+M" in tips["btn_markup"]
     assert "스포이트" in tips["btn_eyedropper"] and "Ctrl+Alt+C" in tips["btn_eyedropper"]
     assert "자" in tips["btn_ruler"] and "Ctrl+Alt+D" in tips["btn_ruler"]
+    assert "Shift" in tips["btn_ruler"]
+    assert "Shift" in tips["btn_markup"]
     assert "최근 핀" in tips["btn_reopen"] and "Ctrl+Alt+R" in tips["btn_reopen"]
     assert "글자 복사" in tips["btn_ocr"]
     assert "단축키: 없음" in tips["btn_ocr"]

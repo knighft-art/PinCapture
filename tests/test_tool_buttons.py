@@ -1,6 +1,7 @@
 """Main-window icon buttons: click and hotkey must toast, and must not lose the front pin."""
+import pytest
 from PySide6.QtCore import QPoint
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from conftest import spin
@@ -160,3 +161,45 @@ def test_reopen_button_brings_the_pin_forward(pc, toolbar):
     assert len(toolbar._pins) == 1
     assert toolbar._pins[0].isVisible()
     assert seen and seen[0] is toolbar._pins[0]
+
+
+def _overlay_still_open(widget) -> bool:
+    try:
+        return widget.isVisible()
+    except RuntimeError:
+        return False
+
+
+def test_second_inspect_overlay_is_closed_when_creation_fails(pc, toolbar, monkeypatch):
+    screen = QGuiApplication.primaryScreen()
+    monkeypatch.setattr(pc.QGuiApplication, "screens", lambda: [screen, screen])
+
+    def grab(_screen):
+        pixmap = QPixmap(8, 8)
+        pixmap.fill(QColor("white"))
+        return pixmap
+
+    monkeypatch.setattr(pc, "grab_screen_raw", grab)
+    opened = []
+
+    class Boom(pc.InspectOverlay):
+        def __init__(self, screen, frozen, mode):
+            if opened:
+                raise RuntimeError("second overlay")
+            super().__init__(screen, frozen, mode)
+            opened.append(self)
+
+    monkeypatch.setattr(pc, "InspectOverlay", Boom)
+    session = pc.ScreenInspectSession("ruler")
+    with pytest.raises(RuntimeError, match="second overlay"):
+        session.start()
+    assert session._overlays == []
+    assert opened and _overlay_still_open(opened[0]) is False
+
+    opened.clear()
+    toolbar._was_visible = False
+    toolbar._run_inspect("eyedropper")
+    assert toolbar._capturing is False
+    assert toolbar._session is None
+    assert "못했어요" in toolbar._last_notice
+    assert opened and _overlay_still_open(opened[0]) is False
