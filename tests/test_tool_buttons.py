@@ -87,19 +87,26 @@ def test_inspect_overlay_is_raised_before_it_is_activated(pc, monkeypatch):
         session._cleanup()
 
 
-def test_markup_hotkey_prefers_the_selected_capture(pc, toolbar):
+def test_markup_hotkey_edits_the_existing_pin_in_place(pc, toolbar):
+    """A different history image must not open a second window over a pin."""
     red = _img(20, 16, "red")
     blue = _img(20, 16, "blue")
     toolbar.history = [pc.HistoryEntry(image=red)]
     toolbar.populate()
     front = toolbar._make_pin(blue, None)
+    front.move(48, 36)
+    home = front.frameGeometry()
+    size = front.size()
     toolbar.show()
     toolbar.activateWindow()
     toolbar._on_hotkey("markup")
-    opened = [p for p in toolbar._pins if p._img.cacheKey() == red.cacheKey()]
-    assert len(opened) == 1 and opened[0] is not front
-    assert opened[0]._editing is True
-    assert front._editing is False
+    spin(30)
+    assert toolbar._pins == [front]
+    assert front._editing is True
+    assert front._tool == "pen"
+    assert front.frameGeometry() == home
+    assert front.size() == size
+    assert front._bar is not None and front._bar.isVisible()
 
 
 def test_last_clicked_pin_stays_front_when_the_main_window_is_active(pc, toolbar):

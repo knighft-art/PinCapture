@@ -35,6 +35,9 @@
 #                      조건이 없거나 메인 창이 앞에 있을 때 조용히 무시되던 문제. 핀 낙서(자유 곡선)
 #   v0.10.3 2026-11-04 Grok (Grok 4.7) — 핀 표시 도구를 핀 아래 둥근 패널의 아이콘으로.
 #                      화면 구석의 글자 버튼이 배경에 묻히던 문제
+#   v0.10.4 2026-11-04 Grok (Grok 4.7) — 표시 기본 도구를 낙서로 두고, 떠 있는 핀을
+#                      그 창·자리·크기 그대로 편집. 핀이 있으면 새 창을 띄우지 않음.
+#                      다른 그림이면 맨 앞 핀을 알리고, 숨기거나 최소화하거나 없애면 도구를 닫음
 #   Created: 2026-08-04 by Claude via claude.ai / Modified: 2026-11-04 by Grok 4.7 via Cursor
 #   빌드: installer/build.py  (PyInstaller onedir + Inno Setup → PinCapture-Setup-<버전>.exe)
 """
@@ -46,7 +49,7 @@
   · 전체 화면 캡처 (마우스가 있는 모니터)
   · 핀 고정 (캡처한 이미지를 항상 위 창으로 화면에 고정)
   · 핀 우클릭: 글자 복사(문단·표·수식, Windows OCR / 선택 수식 모델), 투명도, 클릭 통과
-  · 핀 위 표시: 화살표, 네모, 형광펜, 모자이크, 낙서 (복사·저장에 합성, OCR 은 원본)
+  · 핀 위 표시: 낙서(기본), 네모, 화살표, 형광펜, 모자이크 (떠 있는 핀 위에 바로 그림. 복사·저장에 합성, OCR 은 원본)
   · 스포이트(화면 색 HEX), 자(두 점의 물리 픽셀 거리)
   · 닫은 핀 다시 열기 (전역 단축키·트레이)
   · 전역 단축키, 트레이 상주, 자동 저장 + 클립보드 복사
@@ -74,7 +77,7 @@ IS_WINDOWS = sys.platform == "win32"
 _NO_WINDOW = 0x08000000 if IS_WINDOWS else 0   # subprocess.CREATE_NO_WINDOW
 
 APP_NAME = "핀캡처"
-APP_VERSION = "0.10.3"
+APP_VERSION = "0.10.4"
 APP_PUBLISHER = "캐모마일그레이"                 # 정보 창에 보이는 이름
 APP_PUBLISHER_EN = "ChamomileGrey"             # 설치 정보·EXE 속성과 같은 영문 이름
 KOFI_URL = "https://ko-fi.com/chamomilegrey"   # 후원하기. 이 주소만 연다
@@ -277,8 +280,8 @@ except ImportError as _e:
     _handle_missing_deps(_e)
     raise
 from PySide6.QtCore import (
-    Qt, QEventLoop, QItemSelectionModel, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QSize,
-    QStandardPaths, QThread, QTimer, QUrl, Signal,
+    Qt, QEvent, QEventLoop, QItemSelectionModel, QMimeData, QObject, QPoint, QPointF, QRect, QRectF,
+    QSize, QStandardPaths, QThread, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QGuiApplication, QIcon,
@@ -3152,13 +3155,13 @@ class RecentPinStore:
                 print(f"[recent] {meta.name} 읽기 실패: {e}")
 
 
-MARK_KINDS = ("arrow", "box", "highlight", "mosaic", "pen")
+MARK_KINDS = ("pen", "box", "arrow", "highlight", "mosaic")
 MARK_TOOL_LABELS = (
-    ("arrow", "화살표"),
+    ("pen", "낙서"),
     ("box", "네모"),
+    ("arrow", "화살표"),
     ("highlight", "형광펜"),
     ("mosaic", "모자이크"),
-    ("pen", "낙서"),
 )
 MARK_COLORS = (
     ("빨강", "#E23B3B"),
@@ -3179,6 +3182,7 @@ MARK_BAR_HIT = 34                 # 도구·두께·실행 취소 버튼. 예전
 MARK_BAR_SWATCH = 28
 MARK_BAR_ICON = 20
 MARKUP_BAR_GAP = 8                # 핀과 도구 패널 사이
+MARKUP_ATTENTION_MSEC = 900       # 맨 앞 핀으로 그릴 때 테두리를 굵게 두는 시간
 MARKUP_BAR_MARGIN = 4             # 화면 가장자리에서 띄우는 여백
 _MARK_BAR_SHADOW = 10             # 패널 밖 그림자. 창 크기에는 포함되고 버튼은 패널 안
 _MARK_BAR_PAD_X = 10
@@ -3263,6 +3267,19 @@ def _mark_is_real(mark: Mark) -> bool:
     if mark.kind == "pen":
         return bool(mark.points)
     return abs(mark.x2 - mark.x1) >= 2 or abs(mark.y2 - mark.y1) >= 2
+
+
+def _close_orphan_markup_bar(slot: dict) -> None:
+    """핀이 없어질 때 부모 없는 도구 창을 닫는다. 핀 객체는 건드리지 않는다."""
+    bar = slot.get("widget")
+    slot["widget"] = None
+    if bar is None:
+        return
+    try:
+        bar.hide()
+        bar.close()
+    except RuntimeError:
+        pass
 
 
 def compose_marks(image: QImage, marks) -> QImage:
@@ -3803,9 +3820,12 @@ class PinWindow(QWidget):
         self.on_eyedropper = None         # 화면 스포이트. MainToolbar 가 연결
         self.on_ruler = None
         self.on_activated = None          # 이 핀을 맨 앞 핀으로 기록. MainToolbar 가 연결
+        self.on_markup_began = None       # 다른 핀의 표시를 끝낸다. MainToolbar 가 연결
         self._img_sig = image_signature(image)
         self._editing = False
-        self._tool = "arrow"
+        self._attention = False
+        self._markup_bar = {"widget": None}   # 핀이 없어져도 도구 창을 닫기 위한 자리
+        self._tool = "pen"
         self._color = MARK_COLORS[0][1]
         self._width_preset = 4
         self._marks = []
@@ -3824,6 +3844,7 @@ class PinWindow(QWidget):
         self.setWindowTitle("핀 고정")
         self._apply_size()
         self.setToolTip(PIN_TOOLTIP)
+        self.destroyed.connect(lambda *_args: _close_orphan_markup_bar(self._markup_bar))
 
     @property
     def opacity_percent(self) -> int:
@@ -3937,11 +3958,20 @@ class PinWindow(QWidget):
             return base
         return compose_marks(base, [self._draft])
 
-    def begin_markup(self, tool: str = "arrow") -> bool:
-        """표시 모드. 클릭 통과 중에는 핀이 마우스를 받지 못하므로 거절한다."""
+    def begin_markup(self, tool: str = "pen") -> bool:
+        """이 핀 위에서 표시를 시작한다. 창을 새로 만들거나 위치·크기를 바꾸지 않는다.
+
+        클릭 통과 중에는 핀이 마우스를 받지 못하므로 거절한다.
+        """
         if self._click_through:
             self.show_toast("클릭 통과를 끄고 표시해 주세요.")
             return False
+        cb = self.on_markup_began
+        if cb is not None:
+            try:
+                cb(self)
+            except Exception as exc:
+                _log_exc("pin", exc, "다른 핀 표시 끝내기")
         if tool in MARK_KINDS:
             self._tool = tool
         self._editing = True
@@ -3962,12 +3992,29 @@ class PinWindow(QWidget):
         self._drag = None
         bar = self._bar
         self._bar = None
+        self._markup_bar["widget"] = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.setToolTip(PIN_TOOLTIP)
         if bar is not None:
-            bar.hide()
-            bar.close()
+            try:
+                bar.hide()
+                bar.close()
+            except RuntimeError:
+                pass
         self.update()
+
+    def flash_attention(self, msec: int = MARKUP_ATTENTION_MSEC) -> None:
+        """맨 앞 핀으로 그릴 때 테두리를 잠깐 굵게 한다."""
+        self._attention = True
+        self.update()
+        QTimer.singleShot(max(200, int(msec)), self._clear_attention)
+
+    def _clear_attention(self) -> None:
+        try:
+            self._attention = False
+            self.update()
+        except RuntimeError:
+            return
 
     def set_markup_tool(self, kind: str) -> None:
         if kind in MARK_KINDS:
@@ -4047,6 +4094,7 @@ class PinWindow(QWidget):
     def _ensure_bar(self) -> None:
         if self._bar is None:
             self._bar = MarkupBar(self)
+            self._markup_bar["widget"] = self._bar
         self._bar.sync()
         self._bar.show()
         self._watch_screens(True)
@@ -4217,10 +4265,35 @@ class PinWindow(QWidget):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         p.drawImage(self.rect(), self.rendered_image())
         pen = QPen(QColor(ACCENT))
-        pen.setWidth(2)
+        pen.setWidth(4 if self._attention else 2)
         p.setPen(pen)
         p.drawRect(self.rect().adjusted(0, 0, -1, -1))
         p.end()
+
+    def event(self, e):
+        handled = super().event(e)
+        kind = e.type()
+        try:
+            if kind in (QEvent.Type.WindowActivate, QEvent.Type.ActivationChange):
+                if self.isActiveWindow():
+                    self._remember_front()
+            elif kind == QEvent.Type.WindowStateChange and self.isMinimized():
+                self.end_markup()
+        except RuntimeError:
+            return handled
+        return handled
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        # setWindowFlag 가 핀을 잠깐 숨겼다 다시 보이는 경우가 있다. 다음 틱에도 숨겨져 있을 때만 끝낸다.
+        QTimer.singleShot(0, self._end_markup_if_hidden)
+
+    def _end_markup_if_hidden(self) -> None:
+        try:
+            if self._editing and not self.isVisible():
+                self.end_markup()
+        except RuntimeError:
+            return
 
     def wheelEvent(self, e):
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -4743,7 +4816,7 @@ _WELCOME_MODES = (
     ("window", "창 캡처", "지금 쓰는 창을 찍어요. 일부가 가려져 있어도 창 내용이 나와요."),
     ("full", "전체 화면", "마우스가 있는 모니터 전체를 찍어요."),
     ("pin", "핀 고정", "고른 영역이 항상 위에 떠 있는 창이 돼요."),
-    ("markup", "핀 표시", "고른 캡처나 맨 앞 핀에 화살표·네모·형광펜·모자이크·낙서를 그려요. Esc로 표시만 끝내요."),
+    ("markup", "핀 표시", "고른 캡처와 같은 핀이 있으면 그 핀에, 없으면 맨 앞 핀에 낙서·네모·화살표·형광펜·모자이크를 그려요. 핀이 없으면 고른 캡처를 핀으로 띄워요. Esc로 표시만 끝내요."),
     ("eyedropper", "스포이트", "화면 색을 찍어 HEX로 복사해요. RGB도 함께 보여 줘요."),
     ("ruler", "자", "두 점 사이의 픽셀 거리와 가로·세로를 재요. Shift는 가로·세로·45°예요."),
 )
@@ -5452,7 +5525,8 @@ class MainToolbar(QWidget):
             ("full", self.btn_full, "전체 화면", "마우스가 있는 모니터 전체를 캡처해요."),
             ("pin", self.btn_pin, "핀 고정", "영역을 고르면 그 부분이 항상 위에 떠 있는 핀이 돼요."),
             ("markup", self.btn_markup, "핀에 그리기",
-             "보관함에서 고른 캡처나 맨 앞 핀에 화살표·네모·형광펜·모자이크·낙서를 그려요. 낙서 중 Shift는 직선이에요."),
+             "고른 캡처와 같은 핀이 있으면 그 핀에 그려요. 없으면 맨 앞 핀에 그리고 알려 줘요. "
+             "핀이 없으면 고른 캡처를 핀으로 띄워요. 기본은 낙서예요. 낙서 중 Shift는 직선이에요."),
             ("eyedropper", self.btn_eyedropper, "스포이트", "화면 색을 찍어 HEX로 복사해요. RGB도 보여 줘요."),
             ("ruler", self.btn_ruler, "자", "두 점 사이의 픽셀 거리와 가로·세로를 재요. Shift는 가로·세로·45°예요."),
             (None, self.btn_ocr, "글자 복사",
@@ -5487,18 +5561,26 @@ class MainToolbar(QWidget):
             btn.setEnabled(True)
         self._update_tooltips()
 
+    def _pin_on_screen(self, pin) -> bool:
+        """숨기거나 최소화한 핀은 맨 앞·같은 그림 찾기에서 빼요."""
+        try:
+            return bool(pin.isVisible()) and not pin.isMinimized()
+        except RuntimeError:
+            return False
+
     def _pin_matching(self, img: QImage):
         """같은 객체(cacheKey)를 먼저 찾고, 없으면 픽셀 지문이 같은 핀.
-        보관함 파일을 다시 읽으면 cacheKey 만 달라지고 화면의 핀은 그대로다."""
+        보관함 파일을 다시 읽으면 cacheKey 만 달라지고 화면의 핀은 그대로다.
+        화면에 떠 있는 핀만 본다."""
         if img is None or img.isNull():
             return None
         key = img.cacheKey()
         sig = image_signature(img)
         fuzzy = None
         for pin in reversed(self._pins):
+            if not self._pin_on_screen(pin):
+                continue
             try:
-                if not pin.isVisible():
-                    continue
                 if pin._img.cacheKey() == key:
                     return pin
                 if fuzzy is None and sig and sig == getattr(pin, "_img_sig", None):
@@ -5508,14 +5590,24 @@ class MainToolbar(QWidget):
         return fuzzy
 
     def _pin_for_tool(self):
-        """선택된 보관함 캡처를 우선하고, 없으면 맨 앞 핀. 캡처는 핀으로 띄운 뒤 쓴다."""
+        """표시할 핀. 이미 떠 있는 창을 그 자리·크기로 쓴다.
+
+        고른 캡처와 같은, 화면에 떠 있는 핀이 있으면 그 핀이다.
+        없으면 맨 앞 핀이다. 최소화하거나 숨긴 핀은 둘 다 빠진다.
+        핀이 하나도 없을 때만 고른 캡처로 새 핀을 만든다.
+        """
         img = getattr(self, "_cur_img", None)
-        if img is not None and not img.isNull():
+        has_img = img is not None and not img.isNull()
+        if has_img:
             found = self._pin_matching(img)
             if found is not None:
                 return found
+        front = self._front_pin()
+        if front is not None:
+            return front
+        if has_img:
             return self._make_pin(img, None)
-        return self._front_pin()
+        return None
 
     def _markup_current(self):
         return self.start_pin_markup()
@@ -5788,14 +5880,33 @@ class MainToolbar(QWidget):
         self.capture(mode)
 
     def _front_pin(self):
-        """가장 최근에 만들거나 누른, 보이는 핀. 목록 앞이 아니라 맨 뒤가 앞이다."""
+        """가장 최근에 만들거나, 누르거나, 활성화한 핀. 목록 맨 뒤가 앞이다.
+
+        숨기거나 최소화한 핀은 빠진다.
+        """
         for pin in reversed(self._pins):
+            if self._pin_on_screen(pin):
+                return pin
+        return None
+
+    def _end_other_markup(self, pin) -> None:
+        """이 핀을 그리기 전에 다른 핀의 표시와 도구 창을 닫는다."""
+        for other in list(self._pins):
+            if other is pin:
+                continue
             try:
-                if pin.isVisible():
-                    return pin
+                if other._editing:
+                    other.end_markup()
             except RuntimeError:
                 continue
-        return None
+
+    def _announce_front_pin(self, pin) -> None:
+        """고른 캡처와 다른 핀에 그릴 때, 그 핀을 잠깐 강조하고 이유를 알려요."""
+        try:
+            pin.flash_attention()
+        except RuntimeError:
+            return
+        self._show_notice("고른 캡처와 같은 핀이 없어서 맨 앞 핀에 그려요.")
 
     def _note_front_pin(self, pin) -> None:
         try:
@@ -5840,15 +5951,25 @@ class MainToolbar(QWidget):
         QTimer.singleShot(0, go)
 
     def start_pin_markup(self):
-        """고른 캡처나 맨 앞 핀에서 표시를 시작한다. 버튼과 단축키가 같은 길을 탄다."""
+        """떠 있는 핀에서 표시를 시작한다. 버튼과 단축키가 같은 길을 탄다.
+
+        핀을 옮기거나 크기를 바꾸지 않고, 핀이 있으면 새 창을 띄우지 않는다.
+        """
+        img = getattr(self, "_cur_img", None)
+        has_img = img is not None and not img.isNull()
+        matched = self._pin_matching(img) if has_img else None
+        before = list(self._pins)
         pin = self._pin_for_tool()
         if pin is None:
             self._show_notice("그릴 캡처나 핀이 없어요. 보관함에서 고르거나 핀을 띄워 주세요.")
             return None
+        created = pin not in before
         self._present_pin(pin)
         if not pin.begin_markup(pin._tool):
             self._show_notice("클릭 통과를 끄고 표시해 주세요.")
             return None
+        if has_img and matched is None and not created:
+            self._announce_front_pin(pin)
         self._present_pin(pin)
         self._present_pin_soon(pin)
         return pin
@@ -6152,6 +6273,7 @@ class MainToolbar(QWidget):
         pin.on_eyedropper = lambda: self.start_inspect("eyedropper")
         pin.on_ruler = lambda: self.start_inspect("ruler")
         pin.on_activated = lambda p=pin: self._note_front_pin(p)
+        pin.on_markup_began = self._end_other_markup
         if scale != 1.0:
             pin._scale = float(scale)
             pin._apply_size()

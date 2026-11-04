@@ -580,6 +580,174 @@ def test_markup_bar_fits_narrow_screens_and_picks_the_visible_monitor(pc, monkey
         pin.close()
 
 
+def test_scribble_is_the_first_default_tool_and_markup_stays_on_the_pin(pc, toolbar):
+    """낙서, then 네모, then 화살표. Markup reuses the pin's window, place, and size."""
+    assert [kind for kind, _label in pc.MARK_TOOL_LABELS] == [
+        "pen", "box", "arrow", "highlight", "mosaic"]
+    fresh = pc.PinWindow(_img(12, 12, "white"))
+    assert fresh._tool == "pen"
+    fresh.close()
+
+    src = _img(36, 24, "#336699")
+    other = _img(36, 24, "#cc6633")
+    toolbar.history = [pc.HistoryEntry(image=other)]
+    toolbar.populate()
+    pin = toolbar._make_pin(src, None)
+    pin._scale = 1.6
+    pin._apply_size()
+    pin.move(72, 40)
+    home = pin.frameGeometry()
+    size = pin.size()
+    assert toolbar._pin_for_tool() is pin
+    opened = toolbar.start_pin_markup()
+    spin(30)
+    assert opened is pin
+    assert toolbar._pins == [pin]
+    assert pin._editing is True
+    assert pin._tool == "pen"
+    assert pin.frameGeometry() == home
+    assert pin.size() == size
+    assert pin._scale == 1.6
+    bar = pin._bar
+    assert bar is not None and bar.isVisible()
+    tools = [w for w in bar._draw_widgets if w in bar._tools.values()]
+    assert tools == [bar._tools[kind] for kind, _label in pc.MARK_TOOL_LABELS]
+    assert bar._tools["pen"].isChecked() is True
+    assert bar._tools["arrow"].isChecked() is False
+    assert bar._tools["box"].isChecked() is False
+    menu, acts = pin.build_menu()
+    labels = []
+    for act in menu.actions():
+        sub = act.menu()
+        if sub is not None and sub.title() == "표시":
+            labels = [a.text() for a in sub.actions() if a.text() and a.text() != "표시 끝내기"]
+    assert labels == ["낙서", "네모", "화살표", "형광펜", "모자이크"]
+    menu.close()
+
+    # The capture that is already pinned is edited there, not copied into a new window.
+    toolbar.history = [pc.HistoryEntry(image=src.copy())]
+    toolbar.populate()
+    again = toolbar.start_pin_markup()
+    spin(20)
+    assert again is pin
+    assert toolbar._pins == [pin]
+    assert pin.frameGeometry() == home
+
+    # A newer pin of a different image stays put. The matching pin is edited in place.
+    other_pin = toolbar._make_pin(other, None)
+    other_pin.move(200, 120)
+    other_home = other_pin.frameGeometry()
+    assert toolbar._front_pin() is other_pin
+    targeted = toolbar.start_pin_markup()
+    spin(20)
+    assert targeted is pin
+    assert pin._editing is True
+    assert other_pin._editing is False
+    assert set(toolbar._pins) == {pin, other_pin}
+    assert pin.frameGeometry() == home
+    assert other_pin.frameGeometry() == other_home
+
+
+def _bar_visible(bar) -> bool:
+    try:
+        return bar is not None and bar.isVisible()
+    except RuntimeError:
+        return False
+
+
+def test_unmatched_capture_highlights_the_front_pin_on_its_monitor(pc, toolbar):
+    """A different history image edits the front pin in place and says so, even on another monitor."""
+    primary = QGuiApplication.primaryScreen()
+    other = _FakeScreen(QRect(8000, 0, 900, 700))
+    red = _img(24, 16, "red")
+    blue = _img(24, 16, "blue")
+    toolbar.history = [pc.HistoryEntry(image=red)]
+    toolbar.populate()
+    toolbar.cfg["hotkeys"] = dict(pc.DEFAULTS["hotkeys"])
+    toolbar._update_tooltips()
+    pin = toolbar._make_pin(blue, QPoint(8200, 80))
+    home = pin.frameGeometry()
+    assert pc.screen_for_rect(home, [primary, other]) is other
+    assert primary.geometry().intersected(home).isEmpty()
+    tip = toolbar.btn_markup.toolTip()
+    assert "같은 핀" in tip and "맨 앞" in tip and "알려" in tip
+    toolbar.btn_markup.click()
+    spin(30)
+    assert toolbar._pins == [pin]
+    assert pin._editing is True
+    assert pin._tool == "pen"
+    assert pin.frameGeometry() == home
+    assert pin._attention is True
+    assert toolbar._last_notice == "고른 캡처와 같은 핀이 없어서 맨 앞 핀에 그려요."
+    assert toolbar._notice_toast is not None and toolbar._notice_toast.isVisible()
+    spin(pc.MARKUP_ATTENTION_MSEC + 80)
+    assert pin._attention is False
+
+
+def test_minimized_pins_are_skipped_and_activation_becomes_front(pc, toolbar):
+    red = _img(18, 12, "red")
+    blue = _img(18, 12, "blue")
+    first = toolbar._make_pin(red, QPoint(30, 30))
+    second = toolbar._make_pin(blue, QPoint(90, 30))
+    assert toolbar._front_pin() is second
+    second.setWindowState(Qt.WindowState.WindowMinimized)
+    assert second.isMinimized()
+    assert toolbar._front_pin() is first
+    assert toolbar._pin_matching(blue) is None
+    assert toolbar._pin_matching(red) is first
+    second.setWindowState(Qt.WindowState.WindowNoState)
+    second.show()
+    first.activateWindow()
+    spin(20)
+    assert first.isActiveWindow()
+    assert toolbar._front_pin() is first
+
+
+def test_hiding_a_pin_closes_markup(pc, toolbar):
+    pin = toolbar._make_pin(_img(20, 14, "white"), QPoint(10, 10))
+    assert pin.begin_markup("pen") is True
+    bar = pin._bar
+    pin.hide()
+    spin(20)
+    assert pin.isVisible() is False
+    assert pin._editing is False and pin._bar is None
+    assert _bar_visible(bar) is False
+
+
+def test_minimizing_a_pin_closes_markup(pc, toolbar):
+    pin = toolbar._make_pin(_img(20, 14, "white"), QPoint(10, 10))
+    assert pin.begin_markup("pen") is True
+    bar = pin._bar
+    pin.setWindowState(Qt.WindowState.WindowMinimized)
+    spin(20)
+    assert pin.isMinimized()
+    assert pin._editing is False and pin._bar is None
+    assert _bar_visible(bar) is False
+
+
+def test_destroying_a_pin_closes_the_markup_bar(pc, toolbar):
+    import shiboken6
+    pin = toolbar._make_pin(_img(20, 14, "white"), QPoint(10, 10))
+    assert pin.begin_markup("pen") is True
+    bar = pin._bar
+    toolbar._pins.remove(pin)
+    shiboken6.delete(pin)
+    spin(20)
+    assert _bar_visible(bar) is False
+
+
+def test_starting_markup_ends_the_other_pins_edit(pc, toolbar):
+    first = toolbar._make_pin(_img(16, 12, "red"), QPoint(12, 12))
+    second = toolbar._make_pin(_img(16, 12, "blue"), QPoint(80, 12))
+    assert first.begin_markup("pen") is True
+    first_bar = first._bar
+    assert second.begin_markup("box") is True
+    assert first._editing is False and first._bar is None
+    assert _bar_visible(first_bar) is False
+    assert second._editing is True and second._tool == "box"
+    assert second._bar is not None and second._bar.isVisible()
+
+
 def test_markup_hotkey_needs_a_pin(pc, toolbar):
     toolbar._on_hotkey("markup")
     assert "없어요" in toolbar._last_notice
