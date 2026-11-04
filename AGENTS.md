@@ -6,7 +6,7 @@
 ## 1. 프로젝트 한 줄 요약
 
 핀캡처(PinCapture)는 PySide6로 만든 Windows 10/11 x64용 화면 캡처 트레이 앱이에요. 영역·창·전체 화면 캡처, 화면 위 핀 고정, 보관함, 전역 단축키를 제공해요.
-소스는 `pincapture.py` 한 파일이고, 배포는 PyInstaller onedir + Inno Setup 설치 파일로 해요. 버전은 `pincapture.py`의 `APP_VERSION`(현재 `0.10.1`) 한 곳에서만 관리해요.
+소스는 `pincapture.py` 한 파일이고, 배포는 PyInstaller onedir + Inno Setup 설치 파일로 해요. 버전은 `pincapture.py`의 `APP_VERSION`(현재 `0.10.2`) 한 곳에서만 관리해요.
 
 ## 2. 저장소 지도
 
@@ -46,7 +46,7 @@
 | 시험(작업을 끝낼 때마다) | `py -3.13 -m pytest -q` | `64 passed`, 약 12초(2026-10-26, Windows CI 기준. Linux에서는 단일 인스턴스 이름 시험 1개가 실패할 수 있어요) |
 | 설치 파일 빌드 | `py -3.13 installer\build.py` | `installer\output\PinCapture-Setup-<버전>.exe`, `.sha256.txt`, `_배포안내.txt` |
 | 앱 폴더까지만 빌드 | `py -3.13 installer\build.py --no-setup` | `installer\build\dist\PinCapture\`(Inno Setup 없이도 됨) |
-| 버전 확인 | `py -3.13 pincapture.py --version` | `핀캡처 0.10.1` |
+| 버전 확인 | `py -3.13 pincapture.py --version` | `핀캡처 0.10.2` |
 | 소스로 실행(소유자 확인 후) | `py -3.13 pincapture.py`, 콘솔 없이 실행하려면 `pyw -3.13 pincapture.py` | 창과 트레이 아이콘 |
 
 명령줄 옵션은 아래와 같아요. 모르는 인수는 무시해요(`parse_known_args`).

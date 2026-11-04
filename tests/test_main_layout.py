@@ -117,11 +117,19 @@ def test_icons_are_drawn_for_hidpi(pc):
 
 
 def test_pin_tools_need_a_capture_or_a_pin(pc, toolbar):
-    assert toolbar.btn_markup.isEnabled() is False
-    # OCR stays clickable so a missing target still shows a toast. Markup stays disabled.
+    # Both stay clickable so a missing target still shows a toast.
+    assert toolbar.btn_markup.isEnabled() is True
     assert toolbar.btn_ocr.isEnabled() is True
+    toolbar.cfg["hotkeys"] = dict(pc.DEFAULTS["hotkeys"])
+    toolbar._update_tooltips()
     assert "없어요" in toolbar.btn_markup.toolTip()
+    assert "Ctrl+Alt+M" in toolbar.btn_markup.toolTip()
+    assert "낙서" in toolbar.btn_markup.toolTip()
     assert "없어요" in toolbar.btn_ocr.toolTip()
+    assert "단축키: 없음" in toolbar.btn_ocr.toolTip()
+    toolbar.btn_markup.click()
+    assert toolbar._notice_toast is not None and toolbar._notice_toast.isVisible()
+    assert "없어요" in toolbar._notice_toast.label.text()
     toolbar.btn_ocr.click()
     assert toolbar._notice_toast is not None
     assert toolbar._notice_toast.isVisible()
@@ -191,6 +199,8 @@ def test_icon_tooltips_include_the_name_and_shortcut(pc, toolbar):
     assert "핀에 그리기" in tips["btn_markup"] and "Ctrl+Alt+M" in tips["btn_markup"]
     assert "스포이트" in tips["btn_eyedropper"] and "Ctrl+Alt+C" in tips["btn_eyedropper"]
     assert "자" in tips["btn_ruler"] and "Ctrl+Alt+D" in tips["btn_ruler"]
+    assert "Shift" in tips["btn_ruler"]
+    assert "Shift" in tips["btn_markup"]
     assert "최근 핀" in tips["btn_reopen"] and "Ctrl+Alt+R" in tips["btn_reopen"]
     assert "글자 복사" in tips["btn_ocr"]
     assert "단축키: 없음" in tips["btn_ocr"]

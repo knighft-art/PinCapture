@@ -26,30 +26,30 @@ def _changed(before, after):
     return False
 
 
-def _press(widget, pos, button=Qt.MouseButton.LeftButton):
+def _press(widget, pos, button=Qt.MouseButton.LeftButton, mods=Qt.KeyboardModifier.NoModifier):
     local = QPointF(pos)
     global_pos = QPointF(widget.mapToGlobal(QPoint(pos)))
     event = QMouseEvent(
         QEvent.Type.MouseButtonPress, local, global_pos,
-        button, button, Qt.KeyboardModifier.NoModifier)
+        button, button, mods)
     QApplication.sendEvent(widget, event)
 
 
-def _move(widget, pos):
+def _move(widget, pos, mods=Qt.KeyboardModifier.NoModifier):
     local = QPointF(pos)
     global_pos = QPointF(widget.mapToGlobal(QPoint(pos)))
     event = QMouseEvent(
         QEvent.Type.MouseMove, local, global_pos,
-        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, mods)
     QApplication.sendEvent(widget, event)
 
 
-def _release(widget, pos):
+def _release(widget, pos, mods=Qt.KeyboardModifier.NoModifier):
     local = QPointF(pos)
     global_pos = QPointF(widget.mapToGlobal(QPoint(pos)))
     event = QMouseEvent(
         QEvent.Type.MouseButtonRelease, local, global_pos,
-        Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, mods)
     QApplication.sendEvent(widget, event)
 
 
@@ -190,6 +190,145 @@ def test_click_through_refuses_markup_and_menu_starts_tools(pc, toolbar):
     menu.close()
 
 
+def test_pen_scribble_color_width_undo_and_export(pc, toolbar, monkeypatch):
+    white = _img(48, 48, "white")
+    stroke = pc.Mark("pen", 4, 24, 40, 24, "#E23B3B", 4, points=[(4, 24), (20, 24), (40, 24)])
+    drawn = pc.compose_marks(white, [stroke])
+    assert _rgb(drawn, 20, 24) != (255, 255, 255)
+    assert _rgb(drawn, 0, 0) == (255, 255, 255)
+    dot = pc.compose_marks(white, [pc.Mark("pen", 8, 8, 8, 8, "#2F6BFF", 6, points=[(8, 8)])])
+    assert _rgb(dot, 8, 8) != (255, 255, 255)
+
+    pin = pc.PinWindow(white, dpr=1.0)
+    try:
+        pin.resize(48, 48)
+        pin.show()
+        assert pin.begin_markup("pen") is True
+        assert pin._bar._tools["pen"].text() == "낙서"
+        pin._bar._tools["pen"].click()
+        pin._bar._widths[8].click()
+        assert pin._tool == "pen" and pin._width_preset == 8
+        monkeypatch.setattr(pin, "_ask_markup_color", lambda: QColor("#10FF20"))
+        assert pin.pick_markup_color() == "#10FF20"
+        assert pin._color == "#10FF20"
+        assert pin._bar._custom.isChecked()
+        assert pin._bar._custom.text() == "+"
+        assert pin._bar._custom.accessibleName() == "다른 색"
+        dlg = pin._markup_color_dialog(QColor("#10FF20"))
+        assert dlg.testOption(pc.QColorDialog.ColorDialogOption.DontUseNativeDialog)
+        assert dlg.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+        dlg.close()
+        pin.set_markup_color("not-a-color")
+        assert pin._color == "#10FF20"
+        pin._bar._colors["#E23B3B"].click()
+        assert pin._color == "#E23B3B"
+        assert pin._bar._custom.isChecked() is False
+        assert pin._bar._custom.text() == "+"
+        assert "222222" in pin._bar._custom.styleSheet()
+
+        origin = pin.pos()
+        _press(pin, QPoint(6, 20))
+        _move(pin, QPoint(16, 22))
+        _move(pin, QPoint(30, 28))
+        _release(pin, QPoint(30, 28))
+        assert pin.pos() == origin
+        assert len(pin._marks) == 1
+        assert pin._marks[0].kind == "pen"
+        assert len(pin._marks[0].points) >= 3
+        assert pin._marks[0].width_px == pc.mark_width_px(8, 1.0)
+        assert pin._marks[0].color == "#E23B3B"
+        assert _rgb(pin.image_for_export(), 16, 22) != (255, 255, 255)
+        assert _rgb(pin.image_for_ocr(), 16, 22) == (255, 255, 255)
+        assert pin.undo_mark() is True
+        assert pin._marks == []
+        assert _rgb(pin.rendered_image(), 16, 22) == (255, 255, 255)
+        assert pin.redo_mark() is True
+        _key(pin, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        assert pin._marks == []
+
+        _press(pin, QPoint(10, 10))
+        _release(pin, QPoint(10, 10))
+        assert len(pin._marks) == 1
+        assert pin._marks[0].points
+        menu, acts = pin.build_menu()
+        assert acts["tools"]["pen"].text() == "낙서"
+        pin.apply_menu_action(acts["tools"]["pen"], acts)
+        assert pin._editing and pin._tool == "pen"
+        menu.close()
+    finally:
+        pin.close()
+
+    # A reloaded copy shares pixels but not cacheKey, so markup must reuse the pin.
+    src = _img(24, 16, "#336699")
+    src.setPixel(2, 2, QColor("white").rgb())
+    live = toolbar._make_pin(src, None)
+    copy = src.copy()
+    assert copy.cacheKey() != src.cacheKey()
+    toolbar._cur_img = copy
+    assert toolbar._pin_for_tool() is live
+
+
+def test_pen_release_without_move_keeps_the_end_point(pc):
+    pin = pc.PinWindow(_img(48, 48, "white"), dpr=1.0)
+    try:
+        pin.resize(48, 48)
+        pin.show()
+        pin.begin_markup("pen")
+        _press(pin, QPoint(4, 6))
+        _release(pin, QPoint(40, 22))
+        assert len(pin._marks) == 1
+        assert pin._marks[0].points[0] == (4, 6)
+        assert pin._marks[0].points[-1] == (40, 22)
+        assert len(pin._marks[0].points) >= 2
+    finally:
+        pin.close()
+
+
+def test_shift_scribble_is_a_straight_snapped_line(pc):
+    assert pc.snap_axis_point(QPoint(0, 0), QPoint(10, 1)) == QPoint(10, 0)
+    assert pc.snap_axis_point(QPoint(0, 0), QPoint(2, 20)) == QPoint(0, 20)
+    diagonal = pc.snap_axis_point(QPoint(10, 10), QPoint(30, 26))
+    assert abs(diagonal.x() - 10) == abs(diagonal.y() - 10)
+    assert diagonal != QPoint(10, 10)
+
+    pin = pc.PinWindow(_img(64, 48, "white"), dpr=1.0)
+    shift = Qt.KeyboardModifier.ShiftModifier
+    try:
+        pin.resize(64, 48)
+        pin.show()
+        pin.begin_markup("pen")
+        _press(pin, QPoint(8, 20))
+        _move(pin, QPoint(12, 22))
+        _move(pin, QPoint(40, 24), shift)
+        _release(pin, QPoint(48, 23), shift)
+        assert len(pin._marks) == 1
+        pts = pin._marks[0].points
+        assert pts[0] == (8, 20)
+        assert pts[-1][1] == 20
+        assert pts[-1][0] != 8
+        assert len(pts) == 2
+    finally:
+        pin.close()
+
+
+def test_image_signature_sees_one_pixel_and_alpha(pc, toolbar):
+    base = QImage(24, 16, QImage.Format.Format_ARGB32)
+    base.fill(QColor(50, 60, 70, 255))
+    # (1, 1) is off the old 8×8 lattice (x step 3, y step 2).
+    nudged = base.copy()
+    nudged.setPixelColor(1, 1, QColor(51, 60, 70, 255))
+    assert pc.image_signature(base) != pc.image_signature(nudged)
+    faded = base.copy()
+    faded.setPixelColor(0, 0, QColor(50, 60, 70, 200))
+    assert pc.image_signature(base) != pc.image_signature(faded)
+    assert pc.image_signature(base) == pc.image_signature(base.copy())
+
+    pin = toolbar._make_pin(base, None)
+    assert toolbar._pin_matching(nudged) is None
+    assert toolbar._pin_matching(faded) is None
+    assert toolbar._pin_matching(base.copy()) is pin
+
+
 def test_markup_hotkey_needs_a_pin(pc, toolbar):
     toolbar._on_hotkey("markup")
     assert "없어요" in toolbar._last_notice
@@ -249,12 +388,19 @@ def test_ruler_uses_physical_pixels_at_2x(pc, toolbar):
         assert picked[0]["distance"] == 112
         assert picked[0]["dx"] == 100 and picked[0]["dy"] == 50
         assert picked[0]["scale"] == 200
+        first = dict(picked[0])
+        overlay._anchor = None
+        picked.clear()
+        _press(overlay, QPoint(0, 0))
+        _press(overlay, QPoint(40, 8), mods=Qt.KeyboardModifier.ShiftModifier)
+        assert picked[0]["dx"] == 80 and picked[0]["dy"] == 0
+        assert picked[0]["distance"] == 80
     finally:
         overlay.close()
 
     toolbar._was_visible = False
     toolbar._capturing = True
-    toolbar._finish_inspect(picked[0])
+    toolbar._finish_inspect(first)
     assert "112px" in toolbar._last_notice
     assert "가로 100px" in toolbar._last_notice and "세로 50px" in toolbar._last_notice
     assert "200%" in toolbar._last_notice
