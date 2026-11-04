@@ -3409,12 +3409,61 @@ def _swatch_border(color: str, on: bool) -> str:
     return ACCENT
 
 
+def _rect_area(rect: QRect) -> int:
+    if not rect.isValid() or rect.width() <= 0 or rect.height() <= 0:
+        return 0
+    return int(rect.width()) * int(rect.height())
+
+
+def _point_rect_dist2(pt: QPoint, rect: QRect) -> int:
+    """점과 사각형 사이의 거리 제곱. 안에 있으면 0."""
+    if pt.x() < rect.left():
+        dx = rect.left() - pt.x()
+    elif pt.x() > rect.right():
+        dx = pt.x() - rect.right()
+    else:
+        dx = 0
+    if pt.y() < rect.top():
+        dy = rect.top() - pt.y()
+    elif pt.y() > rect.bottom():
+        dy = pt.y() - rect.bottom()
+    else:
+        dy = 0
+    return dx * dx + dy * dy
+
+
+def screen_for_rect(rect: QRect, screens=None):
+    """핀이 실제로 보이는 화면.
+
+    겹치는 면적이 가장 큰 화면을 고른다. 중심이 모니터 사이 빈 곳에 있어도
+    핀 사각형이 걸친 쪽을 따른다. 어디에도 안 겹치면 중심에서 가장 가까운 화면.
+    """
+    if screens is None:
+        screens = QGuiApplication.screens()
+    screens = [screen for screen in screens if screen is not None]
+    if not screens:
+        return QGuiApplication.primaryScreen()
+    best = None
+    best_area = 0
+    for screen in screens:
+        area = _rect_area(rect.intersected(screen.geometry()))
+        if area > best_area:
+            best = screen
+            best_area = area
+    if best is not None:
+        return best
+    center = rect.center()
+    return min(screens, key=lambda screen: _point_rect_dist2(center, screen.geometry()))
+
+
 def markup_bar_position(pin: QRect, bar: QSize, bounds: QRect,
                         gap: int = MARKUP_BAR_GAP, margin: int = MARKUP_BAR_MARGIN) -> QPoint:
     """표시 도구 창의 왼쪽 위.
 
     핀 바로 아래, 가로는 핀 가운데에 맞춘다. 아래가 화면을 넘으면 위에 둔다.
     둘 다 들어가지 않으면 핀 하단에 겹치고, 어느 쪽이든 같은 화면 안에 둔다.
+    막대가 화면보다 넓으면 왼쪽 여백에 붙인다. 오른쪽이 잘리지 않게 하려면
+    호출하는 쪽에서 MarkupBar.fit_width 로 먼저 줄인다.
     """
     if bounds.width() < 1 or bounds.height() < 1:
         return QPoint(pin.left(), pin.bottom() + 1 + gap)
@@ -3497,16 +3546,25 @@ class MarkupBar(QWidget):
         self.setWindowTitle("표시")
         self.setObjectName("markupBar")
         # 선택자 없이 배경을 주면 자식 버튼까지 글자만 남는다. 패널은 paintEvent 가 그린다.
-        self.setStyleSheet("#markupBar { background: transparent; border: none; }")
-        row = QHBoxLayout(self)
-        row.setContentsMargins(
-            _MARK_BAR_SHADOW + _MARK_BAR_PAD_X,
-            (_MARK_BAR_SHADOW - 2) + _MARK_BAR_PAD_Y,
-            _MARK_BAR_SHADOW + _MARK_BAR_PAD_X,
-            _MARK_BAR_SHADOW + _MARK_BAR_PAD_Y,
-        )
-        row.setSpacing(4)
+        self.setStyleSheet(
+            "#markupBar, #markupBarRow { background: transparent; border: none; }")
+        self.is_wrapped = False
+        self._top = QWidget(self)
+        self._bottom = QWidget(self)
+        self._top.setObjectName("markupBarRow")
+        self._bottom.setObjectName("markupBarRow")
+        for host in (self._top, self._bottom):
+            host.setAutoFillBackground(False)
+        self._row1 = QHBoxLayout(self._top)
+        self._row2 = QHBoxLayout(self._bottom)
+        self._row1.setContentsMargins(0, 0, 0, 0)
+        self._row2.setContentsMargins(0, 0, 0, 0)
+        rows = QVBoxLayout(self)
+        rows.setSpacing(4)
+        rows.addWidget(self._top)
+        rows.addWidget(self._bottom)
         self._tools = {}
+        self._draw_widgets = []
         for kind, label in MARK_TOOL_LABELS:
             btn = _markup_tool_button(
                 make_icon(MARK_TOOL_ICONS[kind], size=MARK_BAR_ICON),
@@ -3514,8 +3572,8 @@ class MarkupBar(QWidget):
                 lambda _checked=False, k=kind: pin.set_markup_tool(k),
             )
             self._tools[kind] = btn
-            row.addWidget(btn)
-        row.addWidget(_markup_separator())
+            self._draw_widgets.append(btn)
+        self._draw_widgets.append(_markup_separator())
         self._colors = {}
         for name, color in MARK_COLORS:
             btn = QPushButton()
@@ -3527,7 +3585,7 @@ class MarkupBar(QWidget):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _checked=False, c=color: pin.set_markup_color(c))
             self._colors[color] = btn
-            row.addWidget(btn)
+            self._draw_widgets.append(btn)
         self._custom = QPushButton("+")
         self._custom.setFixedSize(MARK_BAR_SWATCH, MARK_BAR_SWATCH)
         self._custom.setToolTip("다른 색")
@@ -3535,9 +3593,10 @@ class MarkupBar(QWidget):
         self._custom.setCheckable(True)
         self._custom.setCursor(Qt.CursorShape.PointingHandCursor)
         self._custom.clicked.connect(lambda _checked=False: pin.pick_markup_color())
-        row.addWidget(self._custom)
-        row.addWidget(_markup_separator())
+        self._draw_widgets.append(self._custom)
+        self._mid_sep = _markup_separator()
         self._widths = {}
+        self._act_widgets = []
         for preset, label, icon_kind in MARK_WIDTH_LABELS:
             btn = _markup_tool_button(
                 make_icon(icon_kind, size=MARK_BAR_ICON),
@@ -3545,8 +3604,8 @@ class MarkupBar(QWidget):
                 lambda _checked=False, w=preset: pin.set_markup_width(w),
             )
             self._widths[preset] = btn
-            row.addWidget(btn)
-        row.addWidget(_markup_separator())
+            self._act_widgets.append(btn)
+        self._act_widgets.append(_markup_separator())
         self._undo = _markup_tool_button(
             make_icon("undo", size=MARK_BAR_ICON),
             "실행 취소", "실행 취소 (Ctrl+Z)",
@@ -3565,10 +3624,103 @@ class MarkupBar(QWidget):
         self._undo.setCheckable(False)
         self._redo.setCheckable(False)
         self._done.setCheckable(False)
-        row.addWidget(self._undo)
-        row.addWidget(self._redo)
-        row.addWidget(self._done)
+        self._act_widgets.extend((self._undo, self._redo, self._done))
+        self._apply_rows(False)
+        self._set_metrics(MARK_BAR_HIT, MARK_BAR_SWATCH, _MARK_BAR_PAD_X, 4)
         self.sync()
+
+    def buttons(self):
+        """화면에 남아야 하는 버튼. 구분선은 빼요."""
+        return (
+            list(self._tools.values())
+            + list(self._colors.values())
+            + [self._custom]
+            + list(self._widths.values())
+            + [self._undo, self._redo, self._done]
+        )
+
+    def _drain(self, layout) -> None:
+        while layout.count():
+            layout.takeAt(0)
+
+    def _apply_rows(self, wrapped: bool) -> None:
+        """한 줄이 기본. 좁으면 그리기·색 / 두께·실행을 두 줄로 나눈다."""
+        self._drain(self._row1)
+        self._drain(self._row2)
+        for widget in self._draw_widgets:
+            self._row1.addWidget(widget)
+            widget.show()
+        if wrapped:
+            self._mid_sep.hide()
+            for widget in self._act_widgets:
+                self._row2.addWidget(widget)
+                widget.show()
+            self._bottom.show()
+        else:
+            self._mid_sep.show()
+            self._row1.addWidget(self._mid_sep)
+            for widget in self._act_widgets:
+                self._row1.addWidget(widget)
+                widget.show()
+            self._bottom.hide()
+        self.is_wrapped = wrapped
+
+    def _set_metrics(self, hit: int, swatch: int, pad_x: int, spacing: int) -> None:
+        icon = max(12, int(hit) - 14)
+        for btn in (*self._tools.values(), *self._widths.values(), self._undo, self._redo, self._done):
+            btn.setFixedSize(hit, hit)
+            btn.setIconSize(QSize(icon, icon))
+        for btn in (*self._colors.values(), self._custom):
+            btn.setFixedSize(swatch, swatch)
+        lay = self.layout()
+        lay.setContentsMargins(
+            _MARK_BAR_SHADOW + pad_x,
+            (_MARK_BAR_SHADOW - 2) + _MARK_BAR_PAD_Y,
+            _MARK_BAR_SHADOW + pad_x,
+            _MARK_BAR_SHADOW + _MARK_BAR_PAD_Y,
+        )
+        self._row1.setSpacing(spacing)
+        self._row2.setSpacing(spacing)
+
+    def _relayout(self) -> QSize:
+        self.setMinimumSize(0, 0)
+        lay = self.layout()
+        lay.invalidate()
+        lay.activate()
+        self.updateGeometry()
+        self.adjustSize()
+        return self.size()
+
+    def fit_width(self, max_width: int) -> None:
+        """한 줄이 max_width 안에 들어가면 그대로 둔다.
+
+        넘치면 두 줄로 내리고, 그래도 넘치면 버튼과 여백만 줄여 화면 안에 둔다.
+        """
+        max_width = max(1, int(max_width))
+        self._set_metrics(MARK_BAR_HIT, MARK_BAR_SWATCH, _MARK_BAR_PAD_X, 4)
+        self._apply_rows(False)
+        if self._relayout().width() <= max_width:
+            return
+        self._apply_rows(True)
+        if self._relayout().width() <= max_width:
+            return
+        hit, swatch, pad, spacing = MARK_BAR_HIT, MARK_BAR_SWATCH, _MARK_BAR_PAD_X, 4
+        guard = 0
+        while self.width() > max_width and guard < 80:
+            guard += 1
+            if hit > 16:
+                hit -= 1
+            elif swatch > 14:
+                swatch -= 1
+            elif spacing > 2:
+                spacing -= 1
+            elif pad > 4:
+                pad -= 1
+            else:
+                break
+            self._set_metrics(hit, swatch, pad, spacing)
+            self._relayout()
+        self._relayout()
 
     def _panel_rect(self) -> QRectF:
         return QRectF(self.rect()).adjusted(
@@ -3662,6 +3814,8 @@ class PinWindow(QWidget):
         self._draft_origin = None
         self._cache = None
         self._bar = None
+        self._screen_watch = False
+        self._hooked = []
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.WindowStaysOnTopHint
                             | Qt.WindowType.Tool)
@@ -3801,6 +3955,7 @@ class PinWindow(QWidget):
 
     def end_markup(self) -> None:
         """표시만 끝낸다. 핀은 닫지 않는다."""
+        self._watch_screens(False)
         self._editing = False
         self._draft = None
         self._draft_origin = None
@@ -3894,23 +4049,82 @@ class PinWindow(QWidget):
             self._bar = MarkupBar(self)
         self._bar.sync()
         self._bar.show()
+        self._watch_screens(True)
         self._place_markup_bar()
+
+    def _on_screens_changed(self, *_args) -> None:
+        """모니터가 늘거나 줄고, 위치·작업 표시줄·배율이 바뀌면 도구를 다시 붙인다."""
+        if self._editing and self._bar is not None:
+            self._place_markup_bar()
+
+    def _hook_screen(self, screen) -> None:
+        if screen is None or screen in self._hooked:
+            return
+        screen.geometryChanged.connect(self._on_screens_changed)
+        screen.availableGeometryChanged.connect(self._on_screens_changed)
+        if hasattr(screen, "logicalDotsPerInchChanged"):
+            screen.logicalDotsPerInchChanged.connect(self._on_screens_changed)
+        self._hooked.append(screen)
+
+    def _unhook_screen(self, screen) -> None:
+        if screen not in self._hooked:
+            return
+        signals = [screen.geometryChanged, screen.availableGeometryChanged]
+        if hasattr(screen, "logicalDotsPerInchChanged"):
+            signals.append(screen.logicalDotsPerInchChanged)
+        for signal in signals:
+            try:
+                signal.disconnect(self._on_screens_changed)
+            except (RuntimeError, TypeError):
+                pass
+        self._hooked.remove(screen)
+
+    def _on_screen_added(self, screen) -> None:
+        self._hook_screen(screen)
+        self._on_screens_changed()
+
+    def _on_screen_removed(self, screen) -> None:
+        self._unhook_screen(screen)
+        self._on_screens_changed()
+
+    def _watch_screens(self, on: bool) -> None:
+        app = QGuiApplication.instance()
+        if app is None:
+            return
+        if on:
+            if self._screen_watch:
+                return
+            self._screen_watch = True
+            app.screenAdded.connect(self._on_screen_added)
+            app.screenRemoved.connect(self._on_screen_removed)
+            for screen in app.screens():
+                self._hook_screen(screen)
+            return
+        if not self._screen_watch:
+            return
+        self._screen_watch = False
+        try:
+            app.screenAdded.disconnect(self._on_screen_added)
+            app.screenRemoved.disconnect(self._on_screen_removed)
+        except (RuntimeError, TypeError):
+            pass
+        for screen in list(self._hooked):
+            self._unhook_screen(screen)
 
     def _place_markup_bar(self) -> None:
         bar = self._bar
         if bar is None:
             return
-        lay = bar.layout()
-        if lay is not None:
-            lay.activate()
-        bar.adjustSize()
         g = self.frameGeometry()
-        screen = QGuiApplication.screenAt(g.center()) or self.screen() or QGuiApplication.primaryScreen()
+        screen = screen_for_rect(g)
         if screen is not None:
             bounds = screen.availableGeometry()
+            if bounds.width() < 1 or bounds.height() < 1:
+                bounds = screen.geometry()
         else:
             bounds = QRect(g.left() - 200, g.top() - 80, max(g.width(), bar.width()) + 400,
                            max(g.height() + bar.height() + 160, 400))
+        bar.fit_width(max(1, bounds.width() - 2 * MARKUP_BAR_MARGIN))
         bar.move(markup_bar_position(g, bar.size(), bounds))
         bar.raise_()
 
