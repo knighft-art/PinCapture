@@ -1,5 +1,5 @@
 """v0.9.0 pin markup, eyedropper, and ruler. OCR stays on the unmarked original."""
-from PySide6.QtCore import QEvent, QPoint, QPointF, QSize, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPixmap
 from PySide6.QtWidgets import QApplication
 
@@ -225,6 +225,10 @@ def test_pen_scribble_color_width_undo_and_export(pc, toolbar, monkeypatch):
         assert pin._bar._custom.isChecked() is False
         assert pin._bar._custom.text() == "+"
         assert "222222" in pin._bar._custom.styleSheet()
+        monkeypatch.setattr(pin, "_ask_markup_color", lambda: QColor())
+        pin._bar._custom.click()
+        assert pin._color == "#E23B3B"
+        assert pin._bar._custom.isChecked() is False
 
         origin = pin.pos()
         _press(pin, QPoint(6, 20))
@@ -327,6 +331,135 @@ def test_image_signature_sees_one_pixel_and_alpha(pc, toolbar):
     assert toolbar._pin_matching(nudged) is None
     assert toolbar._pin_matching(faded) is None
     assert toolbar._pin_matching(base.copy()) is pin
+
+
+def _at(image, x, y):
+    ratio = image.devicePixelRatio() or 1
+    return QColor(image.pixel(int(x * ratio), int(y * ratio)))
+
+
+def _panel_is_solid_and_rounded(image, bar):
+    button = bar._tools["arrow"]
+    origin = button.mapTo(bar, QPoint(0, 0))
+    pad = _at(image, origin.x() - 6, origin.y() + button.height() // 2)
+    corner = _at(image, 1, 1)
+    solid = pad.alpha() > 230 and pad.red() > 245 and pad.green() > 245 and pad.blue() > 245
+    rounded = corner.alpha() < 40 or (corner.red() + corner.green() + corner.blue()) < pad.red()
+    return solid and rounded
+
+
+def _button_shows_selection(image, bar, btn):
+    origin = btn.mapTo(bar, QPoint(0, 0))
+    blues = 0
+    for y in range(2, btn.height() - 2):
+        for x in range(2, btn.width() - 2):
+            c = _at(image, origin.x() + x, origin.y() + y)
+            if c.blue() > 170 and c.blue() > c.red() + 15:
+                blues += 1
+    return blues > 12
+
+
+def test_markup_bar_docks_under_the_pin_and_stays_visible(pc):
+    """The bar sits under the pin (above if the bottom is full), on a solid panel."""
+    bounds = QRect(0, 0, 800, 600)
+    bar = QSize(180, 56)
+    pin_rect = QRect(100, 80, 200, 120)
+    mid = pc.markup_bar_position(pin_rect, bar, bounds)
+    assert mid.y() == pin_rect.bottom() + 1 + pc.MARKUP_BAR_GAP
+    assert mid.x() == pin_rect.center().x() - bar.width() // 2
+
+    wide = QSize(700, 56)
+    clamped = pc.markup_bar_position(pin_rect, wide, bounds)
+    assert clamped.x() == bounds.left() + pc.MARKUP_BAR_MARGIN
+    assert clamped.y() == mid.y()
+
+    low = pc.markup_bar_position(QRect(100, 520, 200, 70), bar, bounds)
+    assert low.y() + bar.height() <= 520 - pc.MARKUP_BAR_GAP + 1
+    assert low.y() >= bounds.top()
+
+    full = pc.markup_bar_position(QRect(0, 0, 800, 600), wide, bounds)
+    placed = QRect(full, wide)
+    assert bounds.contains(placed.adjusted(0, 0, -1, -1))
+    assert full.y() > bounds.height() / 2
+    assert not (full.x() <= 8 and full.y() <= 8)
+
+    edge = pc.markup_bar_position(QRect(740, 40, 50, 40), wide, bounds)
+    assert edge.x() >= bounds.left()
+    assert edge.x() + bar.width() <= bounds.right() + 1
+    assert edge.y() >= 40 + 40
+
+    screen = QGuiApplication.primaryScreen()
+    area = screen.availableGeometry()
+    pin = pc.PinWindow(_img(180, 100, "#4488cc"), dpr=1.0)
+    try:
+        pin.show()
+        home = QPoint(area.left() + 90, area.top() + 36)
+        pin.move(home)
+        assert pin.frameGeometry().topLeft() == home
+        assert pin.begin_markup("arrow") is True
+        bar_w = pin._bar
+        QApplication.processEvents()
+
+        def docked():
+            return bar_w.pos() == pc.markup_bar_position(pin.frameGeometry(), bar_w.size(), area)
+
+        assert bar_w.width() >= 360 and bar_w.height() >= 48
+        assert docked()
+        assert bar_w.frameGeometry().top() >= pin.frameGeometry().bottom()
+        assert area.contains(bar_w.frameGeometry().center())
+
+        nudged = QPoint(home.x() + 48, home.y() + 30)
+        pin.move(nudged)
+        QApplication.processEvents()
+        assert pin.frameGeometry().topLeft() == nudged
+        assert docked()
+        assert bar_w.frameGeometry().top() >= pin.frameGeometry().bottom()
+
+        pin.move(QPoint(area.left() + 24, area.bottom() - pin.height() - 1))
+        QApplication.processEvents()
+        assert docked()
+        assert area.contains(bar_w.frameGeometry().center())
+        if pin.frameGeometry().top() - area.top() > bar_w.height() + pc.MARKUP_BAR_GAP:
+            assert bar_w.frameGeometry().bottom() <= pin.frameGeometry().top()
+
+        for kind, label in pc.MARK_TOOL_LABELS:
+            btn = bar_w._tools[kind]
+            assert label == btn.text() == btn.toolTip() == btn.accessibleName()
+            assert not btn.icon().isNull()
+            assert btn.width() >= pc.MARK_BAR_HIT and btn.height() >= pc.MARK_BAR_HIT
+        assert bar_w._tools["arrow"].isChecked()
+        assert bar_w._tools["pen"].isChecked() is False
+        for preset, label, _icon in pc.MARK_WIDTH_LABELS:
+            width_btn = bar_w._widths[preset]
+            assert width_btn.toolTip() == label
+            assert width_btn.width() >= pc.MARK_BAR_HIT
+            assert not width_btn.icon().isNull()
+        assert bar_w._widths[4].isChecked()
+        assert bar_w._widths[2].isChecked() is False
+        bar_w._widths[8].click()
+        assert bar_w._widths[8].isChecked() and pin._width_preset == 8
+        assert bar_w._colors["#E23B3B"].isChecked()
+        assert bar_w._colors["#E23B3B"].width() >= pc.MARK_BAR_SWATCH
+        assert "실행 취소" in bar_w._undo.toolTip() and "Ctrl+Z" in bar_w._undo.toolTip()
+        assert "다시 실행" in bar_w._redo.toolTip() and "Ctrl+Y" in bar_w._redo.toolTip()
+        assert bar_w._done.toolTip().startswith("완료") and "Esc" in bar_w._done.toolTip()
+        assert not bar_w._undo.icon().isNull()
+        assert not bar_w._done.icon().isNull()
+
+        shot = bar_w.grab().toImage()
+        assert _panel_is_solid_and_rounded(shot, bar_w)
+        assert _button_shows_selection(shot, bar_w, bar_w._tools["arrow"])
+        assert not _button_shows_selection(shot, bar_w, bar_w._tools["pen"])
+
+        pin._commit_mark(pc.Mark("arrow", 8, 8, 40, 30, "#E23B3B", 4))
+        bar_w._undo.click()
+        assert pin._marks == []
+        bar_w._redo.click()
+        assert len(pin._marks) == 1
+        bar_w._done.click()
+        assert pin._editing is False and pin.isVisible() and pin._bar is None
+    finally:
+        pin.close()
 
 
 def test_markup_hotkey_needs_a_pin(pc, toolbar):
