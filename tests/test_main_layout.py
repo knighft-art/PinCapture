@@ -179,11 +179,14 @@ def test_ocr_uses_the_selected_capture_before_the_front_pin(pc, toolbar, monkeyp
     assert QApplication.clipboard().text() == "가나다"
     assert toolbar._pins == [front]
 
+    before = front.frameGeometry()
     toolbar.btn_markup.click()
-    selected = [p for p in toolbar._pins if p._img.cacheKey() == red.cacheKey()]
-    assert len(selected) == 1 and selected[0] is not front
+    assert toolbar._pins == [front]
+    assert front._editing is True
+    assert front.frameGeometry() == before
+    selected_pin = toolbar._make_pin(red, None)
     called = {}
-    selected[0].copy_ocr = lambda: called.setdefault("selected", True) or "from-pin"
+    selected_pin.copy_ocr = lambda: called.setdefault("selected", True) or "from-pin"
     front.copy_ocr = lambda: called.setdefault("front", True)
     monkeypatch.setattr(pc, "recognize_image", lambda image: called.setdefault("image", True))
     toolbar.btn_ocr.click()

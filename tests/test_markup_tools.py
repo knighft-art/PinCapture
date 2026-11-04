@@ -580,6 +580,74 @@ def test_markup_bar_fits_narrow_screens_and_picks_the_visible_monitor(pc, monkey
         pin.close()
 
 
+def test_scribble_is_the_first_default_tool_and_markup_stays_on_the_pin(pc, toolbar):
+    """낙서, then 네모, then 화살표. Markup reuses the pin's window, place, and size."""
+    assert [kind for kind, _label in pc.MARK_TOOL_LABELS] == [
+        "pen", "box", "arrow", "highlight", "mosaic"]
+    fresh = pc.PinWindow(_img(12, 12, "white"))
+    assert fresh._tool == "pen"
+    fresh.close()
+
+    src = _img(36, 24, "#336699")
+    other = _img(36, 24, "#cc6633")
+    toolbar.history = [pc.HistoryEntry(image=other)]
+    toolbar.populate()
+    pin = toolbar._make_pin(src, None)
+    pin._scale = 1.6
+    pin._apply_size()
+    pin.move(72, 40)
+    home = pin.frameGeometry()
+    size = pin.size()
+    assert toolbar._pin_for_tool() is pin
+    opened = toolbar.start_pin_markup()
+    spin(30)
+    assert opened is pin
+    assert toolbar._pins == [pin]
+    assert pin._editing is True
+    assert pin._tool == "pen"
+    assert pin.frameGeometry() == home
+    assert pin.size() == size
+    assert pin._scale == 1.6
+    bar = pin._bar
+    assert bar is not None and bar.isVisible()
+    tools = [w for w in bar._draw_widgets if w in bar._tools.values()]
+    assert tools == [bar._tools[kind] for kind, _label in pc.MARK_TOOL_LABELS]
+    assert bar._tools["pen"].isChecked() is True
+    assert bar._tools["arrow"].isChecked() is False
+    assert bar._tools["box"].isChecked() is False
+    menu, acts = pin.build_menu()
+    labels = []
+    for act in menu.actions():
+        sub = act.menu()
+        if sub is not None and sub.title() == "표시":
+            labels = [a.text() for a in sub.actions() if a.text() and a.text() != "표시 끝내기"]
+    assert labels == ["낙서", "네모", "화살표", "형광펜", "모자이크"]
+    menu.close()
+
+    # The capture that is already pinned is edited there, not copied into a new window.
+    toolbar.history = [pc.HistoryEntry(image=src.copy())]
+    toolbar.populate()
+    again = toolbar.start_pin_markup()
+    spin(20)
+    assert again is pin
+    assert toolbar._pins == [pin]
+    assert pin.frameGeometry() == home
+
+    # A newer pin of a different image stays put. The matching pin is edited in place.
+    other_pin = toolbar._make_pin(other, None)
+    other_pin.move(200, 120)
+    other_home = other_pin.frameGeometry()
+    assert toolbar._front_pin() is other_pin
+    targeted = toolbar.start_pin_markup()
+    spin(20)
+    assert targeted is pin
+    assert pin._editing is True
+    assert other_pin._editing is False
+    assert set(toolbar._pins) == {pin, other_pin}
+    assert pin.frameGeometry() == home
+    assert other_pin.frameGeometry() == other_home
+
+
 def test_markup_hotkey_needs_a_pin(pc, toolbar):
     toolbar._on_hotkey("markup")
     assert "없어요" in toolbar._last_notice
