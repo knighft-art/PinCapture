@@ -33,6 +33,8 @@
 #                      트레이 풍선만 쓰면 알림이 꺼져 있을 때 반응이 없었음
 #   v0.10.2 2026-11-04 Grok (Grok 4.7) — 캡처 줄 아이콘(그리기·스포이트·자·글자 복사·최근 핀)이
 #                      조건이 없거나 메인 창이 앞에 있을 때 조용히 무시되던 문제. 핀 낙서(자유 곡선)
+#   v0.10.3 2026-11-04 Grok (Grok 4.7) — 핀 표시 도구를 핀 아래 둥근 패널의 아이콘으로.
+#                      화면 구석의 글자 버튼이 배경에 묻히던 문제
 #   Created: 2026-08-04 by Claude via claude.ai / Modified: 2026-11-04 by Grok 4.7 via Cursor
 #   빌드: installer/build.py  (PyInstaller onedir + Inno Setup → PinCapture-Setup-<버전>.exe)
 """
@@ -72,7 +74,7 @@ IS_WINDOWS = sys.platform == "win32"
 _NO_WINDOW = 0x08000000 if IS_WINDOWS else 0   # subprocess.CREATE_NO_WINDOW
 
 APP_NAME = "핀캡처"
-APP_VERSION = "0.10.2"
+APP_VERSION = "0.10.3"
 APP_PUBLISHER = "캐모마일그레이"                 # 정보 창에 보이는 이름
 APP_PUBLISHER_EN = "ChamomileGrey"             # 설치 정보·EXE 속성과 같은 영문 이름
 KOFI_URL = "https://ko-fi.com/chamomilegrey"   # 후원하기. 이 주소만 연다
@@ -275,7 +277,7 @@ except ImportError as _e:
     _handle_missing_deps(_e)
     raise
 from PySide6.QtCore import (
-    Qt, QEventLoop, QItemSelectionModel, QMimeData, QObject, QPoint, QPointF, QRect, QSize,
+    Qt, QEventLoop, QItemSelectionModel, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QSize,
     QStandardPaths, QThread, QTimer, QUrl, Signal,
 )
 from PySide6.QtGui import (
@@ -697,6 +699,119 @@ def _draw_reopen(p: QPainter, s: int, c: QColor):
     p.drawLine(QPointF(s - 7, 6), QPointF(s - 7, 10))
 
 
+def _draw_mark_arrow(p: QPainter, s: int, c: QColor):
+    """오른쪽 위 화살표. 핀 표시의 화살표 도구."""
+    tail = QPointF(s * 0.26, s * 0.74)
+    tip = QPointF(s * 0.76, s * 0.26)
+    p.drawLine(tail, tip)
+    dx, dy = tip.x() - tail.x(), tip.y() - tail.y()
+    length = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / length, dy / length
+    px, py = -uy, ux
+    head = s * 0.30
+    base = QPointF(tip.x() - ux * head, tip.y() - uy * head)
+    left = QPointF(base.x() + px * head * 0.48, base.y() + py * head * 0.48)
+    right = QPointF(base.x() - px * head * 0.48, base.y() - py * head * 0.48)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(c))
+    p.drawPolygon(QPolygonF([tip, left, right]))
+
+
+def _draw_mark_box(p: QPainter, s: int, c: QColor):
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    m = s * 0.22
+    p.drawRoundedRect(QRectF(m, m, s - m * 2, s - m * 2), 2, 2)
+
+
+def _draw_mark_highlight(p: QPainter, s: int, c: QColor):
+    """대각 굵은 획. 두께 아이콘(가로선)과 구분되는 형광펜."""
+    pen = QPen(c)
+    pen.setWidthF(max(3.0, s * 0.26))
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    p.drawLine(QPointF(s * 0.24, s * 0.74), QPointF(s * 0.76, s * 0.30))
+
+
+def _draw_mark_mosaic(p: QPainter, s: int, c: QColor):
+    n = 3
+    gap = max(1.0, s * 0.07)
+    side = (s * 0.70 - gap * (n - 1)) / n
+    origin = (s - (side * n + gap * (n - 1))) / 2.0
+    pen = QPen(c)
+    pen.setWidthF(1.1)
+    for row in range(n):
+        for col in range(n):
+            x = origin + col * (side + gap)
+            y = origin + row * (side + gap)
+            if (row + col) % 2 == 0:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(c))
+            else:
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(x, y, side, side), 1, 1)
+
+
+def _draw_mark_pen(p: QPainter, s: int, c: QColor):
+    path = QPainterPath()
+    path.moveTo(s * 0.20, s * 0.68)
+    path.cubicTo(s * 0.34, s * 0.28, s * 0.42, s * 0.30, s * 0.50, s * 0.52)
+    path.cubicTo(s * 0.58, s * 0.74, s * 0.66, s * 0.70, s * 0.82, s * 0.32)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(path)
+
+
+def _draw_hook_arrow(p: QPainter, s: int, c: QColor, mirror: bool):
+    """실행 취소·다시 실행. mirror 이면 좌우를 뒤집는다."""
+    def x_of(x: float) -> float:
+        return (s - x) if mirror else x
+
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    path.moveTo(x_of(s * 0.74), s * 0.36)
+    path.cubicTo(x_of(s * 0.74), s * 0.20, x_of(s * 0.40), s * 0.18, x_of(s * 0.30), s * 0.40)
+    path.cubicTo(x_of(s * 0.20), s * 0.60, x_of(s * 0.36), s * 0.78, x_of(s * 0.66), s * 0.70)
+    p.drawPath(path)
+    tip = QPointF(x_of(s * 0.30), s * 0.40)
+    wing = s * 0.15
+    p.drawLine(tip, QPointF(x_of(s * 0.30 + wing), s * 0.40 - wing * 0.72))
+    p.drawLine(tip, QPointF(x_of(s * 0.30 + wing), s * 0.40 + wing * 0.85))
+
+
+def _draw_undo(p: QPainter, s: int, c: QColor):
+    _draw_hook_arrow(p, s, c, False)
+
+
+def _draw_redo(p: QPainter, s: int, c: QColor):
+    _draw_hook_arrow(p, s, c, True)
+
+
+def _draw_check(p: QPainter, s: int, c: QColor):
+    p.drawLine(QPointF(s * 0.24, s * 0.52), QPointF(s * 0.42, s * 0.72))
+    p.drawLine(QPointF(s * 0.42, s * 0.72), QPointF(s * 0.78, s * 0.30))
+
+
+def _draw_stroke_width(p: QPainter, s: int, c: QColor, width: float):
+    pen = QPen(c)
+    pen.setWidthF(width)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    y = s * 0.50
+    p.drawLine(QPointF(s * 0.20, y), QPointF(s * 0.80, y))
+
+
+def _draw_width_thin(p: QPainter, s: int, c: QColor):
+    _draw_stroke_width(p, s, c, max(1.4, s * 0.07))
+
+
+def _draw_width_mid(p: QPainter, s: int, c: QColor):
+    _draw_stroke_width(p, s, c, max(2.6, s * 0.15))
+
+
+def _draw_width_thick(p: QPainter, s: int, c: QColor):
+    _draw_stroke_width(p, s, c, max(4.2, s * 0.26))
+
+
 def make_icon(kind: str, color: str = TEXT, size: int = 24) -> QIcon:
     fn = {
         "region": _draw_region, "window": _draw_window, "full": _draw_full,
@@ -705,6 +820,11 @@ def make_icon(kind: str, color: str = TEXT, size: int = 24) -> QIcon:
         "copy": _draw_copy, "folder": _draw_folder, "save": _draw_save,
         "trash": _draw_trash, "markup": _draw_markup, "eyedropper": _draw_eyedropper,
         "ruler": _draw_ruler, "ocr": _draw_ocr, "reopen": _draw_reopen,
+        "mark_arrow": _draw_mark_arrow, "mark_box": _draw_mark_box,
+        "mark_highlight": _draw_mark_highlight, "mark_mosaic": _draw_mark_mosaic,
+        "mark_pen": _draw_mark_pen, "undo": _draw_undo, "redo": _draw_redo,
+        "check": _draw_check, "width_thin": _draw_width_thin, "width_mid": _draw_width_mid,
+        "width_thick": _draw_width_thick,
     }[kind]
     icon = QIcon()
     icon.addPixmap(_make_pixmap(size, fn, color), QIcon.Mode.Normal, QIcon.State.Off)
@@ -3047,6 +3167,22 @@ MARK_COLORS = (
     ("검정", "#222222"),
 )
 MARK_WIDTHS = (2, 4, 8)          # 논리 픽셀 프리셋. 이미지에는 dpr 을 곱해 저장
+MARK_WIDTH_LABELS = ((2, "얇게", "width_thin"), (4, "보통", "width_mid"), (8, "굵게", "width_thick"))
+MARK_TOOL_ICONS = {
+    "arrow": "mark_arrow",
+    "box": "mark_box",
+    "highlight": "mark_highlight",
+    "mosaic": "mark_mosaic",
+    "pen": "mark_pen",
+}
+MARK_BAR_HIT = 34                 # 도구·두께·실행 취소 버튼. 예전 글자 버튼보다 조금 큼
+MARK_BAR_SWATCH = 28
+MARK_BAR_ICON = 20
+MARKUP_BAR_GAP = 8                # 핀과 도구 패널 사이
+MARKUP_BAR_MARGIN = 4             # 화면 가장자리에서 띄우는 여백
+_MARK_BAR_SHADOW = 10             # 패널 밖 그림자. 창 크기에는 포함되고 버튼은 패널 안
+_MARK_BAR_PAD_X = 10
+_MARK_BAR_PAD_Y = 6
 HIGHLIGHT_ALPHA = 110
 PIN_TOOLTIP = "드래그로 옮기고, 휠로 크기를 조절해요. Ctrl+휠은 투명도, 우클릭은 메뉴, 더블클릭이나 Esc는 닫기예요."
 PIN_EDIT_TOOLTIP = (
@@ -3264,92 +3400,378 @@ def _marker_ink(color: str) -> str:
     return "#222222" if bright >= 160 else "#FFFFFF"
 
 
+def _swatch_border(color: str, on: bool) -> str:
+    """고른 견본은 파란 테두리. 파랑 견본만 더 진한 파랑이라 테두리가 묻히지 않는다."""
+    if not on:
+        return BORDER
+    if QColor(color).name(QColor.NameFormat.HexRgb).lower() == ACCENT.lower():
+        return ACCENT_DARK
+    return ACCENT
+
+
+def _rect_area(rect: QRect) -> int:
+    if not rect.isValid() or rect.width() <= 0 or rect.height() <= 0:
+        return 0
+    return int(rect.width()) * int(rect.height())
+
+
+def _point_rect_dist2(pt: QPoint, rect: QRect) -> int:
+    """점과 사각형 사이의 거리 제곱. 안에 있으면 0."""
+    if pt.x() < rect.left():
+        dx = rect.left() - pt.x()
+    elif pt.x() > rect.right():
+        dx = pt.x() - rect.right()
+    else:
+        dx = 0
+    if pt.y() < rect.top():
+        dy = rect.top() - pt.y()
+    elif pt.y() > rect.bottom():
+        dy = pt.y() - rect.bottom()
+    else:
+        dy = 0
+    return dx * dx + dy * dy
+
+
+def screen_for_rect(rect: QRect, screens=None):
+    """핀이 실제로 보이는 화면.
+
+    겹치는 면적이 가장 큰 화면을 고른다. 중심이 모니터 사이 빈 곳에 있어도
+    핀 사각형이 걸친 쪽을 따른다. 어디에도 안 겹치면 중심에서 가장 가까운 화면.
+    """
+    if screens is None:
+        screens = QGuiApplication.screens()
+    screens = [screen for screen in screens if screen is not None]
+    if not screens:
+        return QGuiApplication.primaryScreen()
+    best = None
+    best_area = 0
+    for screen in screens:
+        area = _rect_area(rect.intersected(screen.geometry()))
+        if area > best_area:
+            best = screen
+            best_area = area
+    if best is not None:
+        return best
+    center = rect.center()
+    return min(screens, key=lambda screen: _point_rect_dist2(center, screen.geometry()))
+
+
+def markup_bar_position(pin: QRect, bar: QSize, bounds: QRect,
+                        gap: int = MARKUP_BAR_GAP, margin: int = MARKUP_BAR_MARGIN) -> QPoint:
+    """표시 도구 창의 왼쪽 위.
+
+    핀 바로 아래, 가로는 핀 가운데에 맞춘다. 아래가 화면을 넘으면 위에 둔다.
+    둘 다 들어가지 않으면 핀 하단에 겹치고, 어느 쪽이든 같은 화면 안에 둔다.
+    막대가 화면보다 넓으면 왼쪽 여백에 붙인다. 오른쪽이 잘리지 않게 하려면
+    호출하는 쪽에서 MarkupBar.fit_width 로 먼저 줄인다.
+    """
+    if bounds.width() < 1 or bounds.height() < 1:
+        return QPoint(pin.left(), pin.bottom() + 1 + gap)
+    left = bounds.left() + margin
+    right_limit = bounds.right() - bar.width() - margin + 1
+    if bar.width() >= bounds.width() - margin * 2 or right_limit < left:
+        x = bounds.left()
+    else:
+        x = pin.center().x() - bar.width() // 2
+        x = min(max(x, left), right_limit)
+
+    top_limit = bounds.top() + margin
+    bottom_limit = bounds.bottom() - bar.height() - margin + 1
+    if bottom_limit < top_limit:
+        bottom_limit = top_limit
+    below = pin.bottom() + 1 + gap
+    above = pin.top() - gap - bar.height()
+    if top_limit <= below <= bottom_limit:
+        y = below
+    elif top_limit <= above <= bottom_limit:
+        y = above
+    else:
+        y = pin.bottom() + 1 - bar.height() - gap
+        y = min(max(y, top_limit), bottom_limit)
+    return QPoint(int(x), int(y))
+
+
+_MARK_BTN_QSS = f"""
+    QToolButton {{
+        border: 1px solid transparent;
+        border-radius: 8px;
+        background: transparent;
+        padding: 0px;
+    }}
+    QToolButton:hover {{ background: #EDF3FE; }}
+    QToolButton:pressed {{ background: #DDE9FD; }}
+    QToolButton:checked {{
+        background: #D6E4FC;
+        border: 1px solid {ACCENT};
+    }}
+"""
+
+
+def _markup_tool_button(icon: QIcon, name: str, tip: str, slot, size: int = MARK_BAR_HIT) -> QToolButton:
+    btn = QToolButton()
+    btn.setIcon(icon)
+    btn.setIconSize(QSize(MARK_BAR_ICON, MARK_BAR_ICON))
+    btn.setText(name)
+    btn.setAccessibleName(name)
+    btn.setToolTip(tip)
+    btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+    btn.setFixedSize(size, size)
+    btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.setCheckable(True)
+    btn.setStyleSheet(_MARK_BTN_QSS)
+    btn.clicked.connect(slot)
+    return btn
+
+
+def _markup_separator() -> QFrame:
+    line = QFrame()
+    line.setFixedSize(1, 22)
+    line.setStyleSheet(f"background:{BORDER}; border: none; max-width: 1px;")
+    return line
+
+
 class MarkupBar(QWidget):
-    """표시 중인 핀 옆에 뜨는 작은 도구. 메인 창에는 넣지 않는다."""
+    """표시 중인 핀 아래(자리가 없으면 위)에 뜨는 도구. 메인 창에는 넣지 않는다."""
 
     def __init__(self, pin: "PinWindow"):
         super().__init__(None)
         self._pin = pin
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.WindowStaysOnTopHint
-                            | Qt.WindowType.Tool)
+                            | Qt.WindowType.Tool
+                            | Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setWindowTitle("표시")
-        self.setStyleSheet(f"background:{BG}; border: 1px solid #D5DDEA; border-radius: 8px;")
-        row = QHBoxLayout(self)
-        row.setContentsMargins(8, 6, 8, 6)
-        row.setSpacing(4)
+        self.setObjectName("markupBar")
+        # 선택자 없이 배경을 주면 자식 버튼까지 글자만 남는다. 패널은 paintEvent 가 그린다.
+        self.setStyleSheet(
+            "#markupBar, #markupBarRow { background: transparent; border: none; }")
+        self.is_wrapped = False
+        self._top = QWidget(self)
+        self._bottom = QWidget(self)
+        self._top.setObjectName("markupBarRow")
+        self._bottom.setObjectName("markupBarRow")
+        for host in (self._top, self._bottom):
+            host.setAutoFillBackground(False)
+        self._row1 = QHBoxLayout(self._top)
+        self._row2 = QHBoxLayout(self._bottom)
+        self._row1.setContentsMargins(0, 0, 0, 0)
+        self._row2.setContentsMargins(0, 0, 0, 0)
+        rows = QVBoxLayout(self)
+        rows.setSpacing(4)
+        rows.addWidget(self._top)
+        rows.addWidget(self._bottom)
         self._tools = {}
+        self._draw_widgets = []
         for kind, label in MARK_TOOL_LABELS:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _checked=False, k=kind: pin.set_markup_tool(k))
+            btn = _markup_tool_button(
+                make_icon(MARK_TOOL_ICONS[kind], size=MARK_BAR_ICON),
+                label, label,
+                lambda _checked=False, k=kind: pin.set_markup_tool(k),
+            )
             self._tools[kind] = btn
-            row.addWidget(btn)
+            self._draw_widgets.append(btn)
+        self._draw_widgets.append(_markup_separator())
         self._colors = {}
         for name, color in MARK_COLORS:
             btn = QPushButton()
-            btn.setFixedSize(22, 22)
+            btn.setFixedSize(MARK_BAR_SWATCH, MARK_BAR_SWATCH)
+            btn.setText("")
             btn.setToolTip(name)
+            btn.setAccessibleName(name)
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _checked=False, c=color: pin.set_markup_color(c))
             self._colors[color] = btn
-            row.addWidget(btn)
+            self._draw_widgets.append(btn)
         self._custom = QPushButton("+")
-        self._custom.setFixedSize(22, 22)
+        self._custom.setFixedSize(MARK_BAR_SWATCH, MARK_BAR_SWATCH)
         self._custom.setToolTip("다른 색")
         self._custom.setAccessibleName("다른 색")
         self._custom.setCheckable(True)
         self._custom.setCursor(Qt.CursorShape.PointingHandCursor)
         self._custom.clicked.connect(lambda _checked=False: pin.pick_markup_color())
-        row.addWidget(self._custom)
+        self._draw_widgets.append(self._custom)
+        self._mid_sep = _markup_separator()
         self._widths = {}
-        for preset, label in ((2, "얇게"), (4, "보통"), (8, "굵게")):
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _checked=False, w=preset: pin.set_markup_width(w))
+        self._act_widgets = []
+        for preset, label, icon_kind in MARK_WIDTH_LABELS:
+            btn = _markup_tool_button(
+                make_icon(icon_kind, size=MARK_BAR_ICON),
+                label, label,
+                lambda _checked=False, w=preset: pin.set_markup_width(w),
+            )
             self._widths[preset] = btn
-            row.addWidget(btn)
-        undo = QPushButton("실행취소")
-        redo = QPushButton("다시실행")
-        done = QPushButton("완료")
-        undo.setCursor(Qt.CursorShape.PointingHandCursor)
-        redo.setCursor(Qt.CursorShape.PointingHandCursor)
-        done.setCursor(Qt.CursorShape.PointingHandCursor)
-        undo.clicked.connect(pin.undo_mark)
-        redo.clicked.connect(pin.redo_mark)
-        done.clicked.connect(pin.end_markup)
-        row.addWidget(undo)
-        row.addWidget(redo)
-        row.addWidget(done)
+            self._act_widgets.append(btn)
+        self._act_widgets.append(_markup_separator())
+        self._undo = _markup_tool_button(
+            make_icon("undo", size=MARK_BAR_ICON),
+            "실행 취소", "실행 취소 (Ctrl+Z)",
+            lambda _checked=False: pin.undo_mark(),
+        )
+        self._redo = _markup_tool_button(
+            make_icon("redo", size=MARK_BAR_ICON),
+            "다시 실행", "다시 실행 (Ctrl+Y)",
+            lambda _checked=False: pin.redo_mark(),
+        )
+        self._done = _markup_tool_button(
+            make_icon("check", ACCENT, size=MARK_BAR_ICON),
+            "완료", "완료 (Esc)",
+            lambda _checked=False: pin.end_markup(),
+        )
+        self._undo.setCheckable(False)
+        self._redo.setCheckable(False)
+        self._done.setCheckable(False)
+        self._act_widgets.extend((self._undo, self._redo, self._done))
+        self._apply_rows(False)
+        self._set_metrics(MARK_BAR_HIT, MARK_BAR_SWATCH, _MARK_BAR_PAD_X, 4)
         self.sync()
+
+    def buttons(self):
+        """화면에 남아야 하는 버튼. 구분선은 빼요."""
+        return (
+            list(self._tools.values())
+            + list(self._colors.values())
+            + [self._custom]
+            + list(self._widths.values())
+            + [self._undo, self._redo, self._done]
+        )
+
+    def _drain(self, layout) -> None:
+        while layout.count():
+            layout.takeAt(0)
+
+    def _apply_rows(self, wrapped: bool) -> None:
+        """한 줄이 기본. 좁으면 그리기·색 / 두께·실행을 두 줄로 나눈다."""
+        self._drain(self._row1)
+        self._drain(self._row2)
+        for widget in self._draw_widgets:
+            self._row1.addWidget(widget)
+            widget.show()
+        if wrapped:
+            self._mid_sep.hide()
+            for widget in self._act_widgets:
+                self._row2.addWidget(widget)
+                widget.show()
+            self._bottom.show()
+        else:
+            self._mid_sep.show()
+            self._row1.addWidget(self._mid_sep)
+            for widget in self._act_widgets:
+                self._row1.addWidget(widget)
+                widget.show()
+            self._bottom.hide()
+        self.is_wrapped = wrapped
+
+    def _set_metrics(self, hit: int, swatch: int, pad_x: int, spacing: int) -> None:
+        icon = max(12, int(hit) - 14)
+        for btn in (*self._tools.values(), *self._widths.values(), self._undo, self._redo, self._done):
+            btn.setFixedSize(hit, hit)
+            btn.setIconSize(QSize(icon, icon))
+        for btn in (*self._colors.values(), self._custom):
+            btn.setFixedSize(swatch, swatch)
+        lay = self.layout()
+        lay.setContentsMargins(
+            _MARK_BAR_SHADOW + pad_x,
+            (_MARK_BAR_SHADOW - 2) + _MARK_BAR_PAD_Y,
+            _MARK_BAR_SHADOW + pad_x,
+            _MARK_BAR_SHADOW + _MARK_BAR_PAD_Y,
+        )
+        self._row1.setSpacing(spacing)
+        self._row2.setSpacing(spacing)
+
+    def _relayout(self) -> QSize:
+        self.setMinimumSize(0, 0)
+        lay = self.layout()
+        lay.invalidate()
+        lay.activate()
+        self.updateGeometry()
+        self.adjustSize()
+        return self.size()
+
+    def fit_width(self, max_width: int) -> None:
+        """한 줄이 max_width 안에 들어가면 그대로 둔다.
+
+        넘치면 두 줄로 내리고, 그래도 넘치면 버튼과 여백만 줄여 화면 안에 둔다.
+        """
+        max_width = max(1, int(max_width))
+        self._set_metrics(MARK_BAR_HIT, MARK_BAR_SWATCH, _MARK_BAR_PAD_X, 4)
+        self._apply_rows(False)
+        if self._relayout().width() <= max_width:
+            return
+        self._apply_rows(True)
+        if self._relayout().width() <= max_width:
+            return
+        hit, swatch, pad, spacing = MARK_BAR_HIT, MARK_BAR_SWATCH, _MARK_BAR_PAD_X, 4
+        guard = 0
+        while self.width() > max_width and guard < 80:
+            guard += 1
+            if hit > 16:
+                hit -= 1
+            elif swatch > 14:
+                swatch -= 1
+            elif spacing > 2:
+                spacing -= 1
+            elif pad > 4:
+                pad -= 1
+            else:
+                break
+            self._set_metrics(hit, swatch, pad, spacing)
+            self._relayout()
+        self._relayout()
+
+    def _panel_rect(self) -> QRectF:
+        return QRectF(self.rect()).adjusted(
+            _MARK_BAR_SHADOW, _MARK_BAR_SHADOW - 2, -_MARK_BAR_SHADOW, -_MARK_BAR_SHADOW)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        panel = self._panel_rect()
+        shadow = QColor(43, 52, 66)
+        for grow, alpha, drop in ((7, 16, 3), (4, 24, 2), (2, 32, 1)):
+            shadow.setAlpha(alpha)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(shadow)
+            p.drawRoundedRect(panel.adjusted(-grow, -grow + drop, grow, grow + drop), 12, 12)
+        p.setPen(QPen(QColor(BORDER), 1))
+        p.setBrush(QColor("white"))
+        p.drawRoundedRect(panel.adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
+        p.end()
 
     def sync(self):
         pin = self._pin
         for kind, btn in self._tools.items():
-            btn.setChecked(kind == pin._tool)
+            on = kind == pin._tool
+            btn.setChecked(on)
+            btn.setIcon(make_icon(MARK_TOOL_ICONS[kind], ACCENT if on else TEXT, size=MARK_BAR_ICON))
         current = str(pin._color)
         known = {color.lower() for color in self._colors}
         for color, btn in self._colors.items():
             on = color.lower() == current.lower()
             btn.setChecked(on)
-            border = "#222222" if on else "#D0D5DD"
+            border = _swatch_border(color, on)
+            width = 3 if on else 2
             btn.setStyleSheet(
-                f"background:{color}; border-radius:4px; border:2px solid {border};")
+                f"background:{color}; border-radius:8px; padding:0; "
+                f"border:{width}px solid {border};")
         custom_on = current.lower() not in known
         swatch = current if custom_on and QColor(current).isValid() else "#FFFFFF"
         self._custom.setChecked(custom_on)
         self._custom.setText("+")
-        border = "#222222" if custom_on else "#D0D5DD"
+        border = _swatch_border(swatch, custom_on)
+        width = 3 if custom_on else 2
         ink = _marker_ink(swatch)
         self._custom.setStyleSheet(
-            f"background:{swatch}; color:{ink}; font-size:14px; font-weight:700; "
-            f"padding:0; border-radius:4px; border:2px solid {border};")
+            f"background:{swatch}; color:{ink}; font-size:15px; font-weight:700; "
+            f"padding:0; border-radius:8px; border:{width}px solid {border};")
         for preset, btn in self._widths.items():
-            btn.setChecked(preset == pin._width_preset)
+            on = preset == pin._width_preset
+            btn.setChecked(on)
+            icon_kind = {w: kind for w, _label, kind in MARK_WIDTH_LABELS}[preset]
+            btn.setIcon(make_icon(icon_kind, ACCENT if on else TEXT, size=MARK_BAR_ICON))
 
     def keyPressEvent(self, e):
         action = _edit_key_action(e)
@@ -3392,6 +3814,8 @@ class PinWindow(QWidget):
         self._draft_origin = None
         self._cache = None
         self._bar = None
+        self._screen_watch = False
+        self._hooked = []
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.WindowStaysOnTopHint
                             | Qt.WindowType.Tool)
@@ -3531,6 +3955,7 @@ class PinWindow(QWidget):
 
     def end_markup(self) -> None:
         """표시만 끝낸다. 핀은 닫지 않는다."""
+        self._watch_screens(False)
         self._editing = False
         self._draft = None
         self._draft_origin = None
@@ -3574,6 +3999,8 @@ class PinWindow(QWidget):
         """색 대화상자. 취소하면 빈 문자열. 고르면 #RRGGBB."""
         chosen = self._ask_markup_color()
         if not chosen.isValid():
+            if self._bar is not None:
+                self._bar.sync()
             return ""
         name = chosen.name(QColor.NameFormat.HexRgb).upper()
         self.set_markup_color(name)
@@ -3622,24 +4049,84 @@ class PinWindow(QWidget):
             self._bar = MarkupBar(self)
         self._bar.sync()
         self._bar.show()
+        self._watch_screens(True)
         self._place_markup_bar()
+
+    def _on_screens_changed(self, *_args) -> None:
+        """모니터가 늘거나 줄고, 위치·작업 표시줄·배율이 바뀌면 도구를 다시 붙인다."""
+        if self._editing and self._bar is not None:
+            self._place_markup_bar()
+
+    def _hook_screen(self, screen) -> None:
+        if screen is None or screen in self._hooked:
+            return
+        screen.geometryChanged.connect(self._on_screens_changed)
+        screen.availableGeometryChanged.connect(self._on_screens_changed)
+        if hasattr(screen, "logicalDotsPerInchChanged"):
+            screen.logicalDotsPerInchChanged.connect(self._on_screens_changed)
+        self._hooked.append(screen)
+
+    def _unhook_screen(self, screen) -> None:
+        if screen not in self._hooked:
+            return
+        signals = [screen.geometryChanged, screen.availableGeometryChanged]
+        if hasattr(screen, "logicalDotsPerInchChanged"):
+            signals.append(screen.logicalDotsPerInchChanged)
+        for signal in signals:
+            try:
+                signal.disconnect(self._on_screens_changed)
+            except (RuntimeError, TypeError):
+                pass
+        self._hooked.remove(screen)
+
+    def _on_screen_added(self, screen) -> None:
+        self._hook_screen(screen)
+        self._on_screens_changed()
+
+    def _on_screen_removed(self, screen) -> None:
+        self._unhook_screen(screen)
+        self._on_screens_changed()
+
+    def _watch_screens(self, on: bool) -> None:
+        app = QGuiApplication.instance()
+        if app is None:
+            return
+        if on:
+            if self._screen_watch:
+                return
+            self._screen_watch = True
+            app.screenAdded.connect(self._on_screen_added)
+            app.screenRemoved.connect(self._on_screen_removed)
+            for screen in app.screens():
+                self._hook_screen(screen)
+            return
+        if not self._screen_watch:
+            return
+        self._screen_watch = False
+        try:
+            app.screenAdded.disconnect(self._on_screen_added)
+            app.screenRemoved.disconnect(self._on_screen_removed)
+        except (RuntimeError, TypeError):
+            pass
+        for screen in list(self._hooked):
+            self._unhook_screen(screen)
 
     def _place_markup_bar(self) -> None:
         bar = self._bar
         if bar is None:
             return
-        bar.adjustSize()
         g = self.frameGeometry()
-        x = g.right() + 8
-        y = g.top()
-        screen = QGuiApplication.screenAt(g.center()) or QGuiApplication.primaryScreen()
+        screen = screen_for_rect(g)
         if screen is not None:
             bounds = screen.availableGeometry()
-            if x + bar.width() > bounds.right() - 4:
-                x = g.left() - bar.width() - 8
-            x = min(max(x, bounds.left() + 4), max(bounds.left() + 4, bounds.right() - bar.width() - 4))
-            y = min(max(y, bounds.top() + 4), max(bounds.top() + 4, bounds.bottom() - bar.height() - 4))
-        bar.move(x, y)
+            if bounds.width() < 1 or bounds.height() < 1:
+                bounds = screen.geometry()
+        else:
+            bounds = QRect(g.left() - 200, g.top() - 80, max(g.width(), bar.width()) + 400,
+                           max(g.height() + bar.height() + 160, 400))
+        bar.fit_width(max(1, bounds.width() - 2 * MARKUP_BAR_MARGIN))
+        bar.move(markup_bar_position(g, bar.size(), bounds))
+        bar.raise_()
 
     def build_menu(self) -> "tuple[QMenu, dict]":
         m = QMenu(self)
@@ -4306,7 +4793,7 @@ class WelcomeDialog(QDialog):
         gv2.addWidget(_muted(
             "· 드래그로 옮기고, 마우스 휠로 크기를 조절해요. Ctrl+휠은 투명도예요.\n"
             "· 우클릭하면 글자 복사(글자·표·수식), 복사, 다른 이름으로 저장, 표시(낙서 포함), 스포이트, 자, 투명도, 클릭 통과 메뉴가 나와요.\n"
-            "· 표시 중에는 드래그로 그리고, 낙서는 마우스를 따라 그려요. Shift는 가로·세로·45° 직선이에요. 색은 견본이나 다른 색에서 고르고, Ctrl+Z로 실행 취소해요. Esc는 핀을 닫지 않고 표시만 끝내요.\n"
+            "· 표시 중에는 핀 바로 아래 도구에서 고르고 드래그로 그려요. 낙서는 마우스를 따라 그려요. Shift는 가로·세로·45° 직선이에요. 색은 견본이나 다른 색에서 고르고, Ctrl+Z로 실행 취소해요. Esc는 핀을 닫지 않고 표시만 끝내요.\n"
             "· 클릭 통과를 켜면 핀을 누를 수 없어요. 트레이의 클릭 통과 해제나 단축키로 꺼 주세요.\n"
             "· 더블클릭이나 Esc로 닫아요. 닫은 핀은 단축키로 다시 열 수 있어요.\n"
             "· 핀 고정으로 찍은 이미지는 기본적으로 파일로 저장하지 않고 클립보드에만 복사해요. "
