@@ -648,6 +648,106 @@ def test_scribble_is_the_first_default_tool_and_markup_stays_on_the_pin(pc, tool
     assert other_pin.frameGeometry() == other_home
 
 
+def _bar_visible(bar) -> bool:
+    try:
+        return bar is not None and bar.isVisible()
+    except RuntimeError:
+        return False
+
+
+def test_unmatched_capture_highlights_the_front_pin_on_its_monitor(pc, toolbar):
+    """A different history image edits the front pin in place and says so, even on another monitor."""
+    primary = QGuiApplication.primaryScreen()
+    other = _FakeScreen(QRect(8000, 0, 900, 700))
+    red = _img(24, 16, "red")
+    blue = _img(24, 16, "blue")
+    toolbar.history = [pc.HistoryEntry(image=red)]
+    toolbar.populate()
+    toolbar.cfg["hotkeys"] = dict(pc.DEFAULTS["hotkeys"])
+    toolbar._update_tooltips()
+    pin = toolbar._make_pin(blue, QPoint(8200, 80))
+    home = pin.frameGeometry()
+    assert pc.screen_for_rect(home, [primary, other]) is other
+    assert primary.geometry().intersected(home).isEmpty()
+    tip = toolbar.btn_markup.toolTip()
+    assert "같은 핀" in tip and "맨 앞" in tip and "알려" in tip
+    toolbar.btn_markup.click()
+    spin(30)
+    assert toolbar._pins == [pin]
+    assert pin._editing is True
+    assert pin._tool == "pen"
+    assert pin.frameGeometry() == home
+    assert pin._attention is True
+    assert toolbar._last_notice == "고른 캡처와 같은 핀이 없어서 맨 앞 핀에 그려요."
+    assert toolbar._notice_toast is not None and toolbar._notice_toast.isVisible()
+    spin(pc.MARKUP_ATTENTION_MSEC + 80)
+    assert pin._attention is False
+
+
+def test_minimized_pins_are_skipped_and_activation_becomes_front(pc, toolbar):
+    red = _img(18, 12, "red")
+    blue = _img(18, 12, "blue")
+    first = toolbar._make_pin(red, QPoint(30, 30))
+    second = toolbar._make_pin(blue, QPoint(90, 30))
+    assert toolbar._front_pin() is second
+    second.setWindowState(Qt.WindowState.WindowMinimized)
+    assert second.isMinimized()
+    assert toolbar._front_pin() is first
+    assert toolbar._pin_matching(blue) is None
+    assert toolbar._pin_matching(red) is first
+    second.setWindowState(Qt.WindowState.WindowNoState)
+    second.show()
+    first.activateWindow()
+    spin(20)
+    assert first.isActiveWindow()
+    assert toolbar._front_pin() is first
+
+
+def test_hiding_a_pin_closes_markup(pc, toolbar):
+    pin = toolbar._make_pin(_img(20, 14, "white"), QPoint(10, 10))
+    assert pin.begin_markup("pen") is True
+    bar = pin._bar
+    pin.hide()
+    spin(20)
+    assert pin.isVisible() is False
+    assert pin._editing is False and pin._bar is None
+    assert _bar_visible(bar) is False
+
+
+def test_minimizing_a_pin_closes_markup(pc, toolbar):
+    pin = toolbar._make_pin(_img(20, 14, "white"), QPoint(10, 10))
+    assert pin.begin_markup("pen") is True
+    bar = pin._bar
+    pin.setWindowState(Qt.WindowState.WindowMinimized)
+    spin(20)
+    assert pin.isMinimized()
+    assert pin._editing is False and pin._bar is None
+    assert _bar_visible(bar) is False
+
+
+def test_destroying_a_pin_closes_the_markup_bar(pc, toolbar):
+    import shiboken6
+    pin = toolbar._make_pin(_img(20, 14, "white"), QPoint(10, 10))
+    assert pin.begin_markup("pen") is True
+    bar = pin._bar
+    toolbar._pins.remove(pin)
+    shiboken6.delete(pin)
+    spin(20)
+    assert _bar_visible(bar) is False
+
+
+def test_starting_markup_ends_the_other_pins_edit(pc, toolbar):
+    first = toolbar._make_pin(_img(16, 12, "red"), QPoint(12, 12))
+    second = toolbar._make_pin(_img(16, 12, "blue"), QPoint(80, 12))
+    assert first.begin_markup("pen") is True
+    first_bar = first._bar
+    assert second.begin_markup("box") is True
+    assert first._editing is False and first._bar is None
+    assert _bar_visible(first_bar) is False
+    assert second._editing is True and second._tool == "box"
+    assert second._bar is not None and second._bar.isVisible()
+
+
 def test_markup_hotkey_needs_a_pin(pc, toolbar):
     toolbar._on_hotkey("markup")
     assert "없어요" in toolbar._last_notice
