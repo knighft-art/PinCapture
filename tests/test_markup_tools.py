@@ -190,6 +190,81 @@ def test_click_through_refuses_markup_and_menu_starts_tools(pc, toolbar):
     menu.close()
 
 
+def test_pen_scribble_color_width_undo_and_export(pc, toolbar, monkeypatch):
+    white = _img(48, 48, "white")
+    stroke = pc.Mark("pen", 4, 24, 40, 24, "#E23B3B", 4, points=[(4, 24), (20, 24), (40, 24)])
+    drawn = pc.compose_marks(white, [stroke])
+    assert _rgb(drawn, 20, 24) != (255, 255, 255)
+    assert _rgb(drawn, 0, 0) == (255, 255, 255)
+    dot = pc.compose_marks(white, [pc.Mark("pen", 8, 8, 8, 8, "#2F6BFF", 6, points=[(8, 8)])])
+    assert _rgb(dot, 8, 8) != (255, 255, 255)
+
+    pin = pc.PinWindow(white, dpr=1.0)
+    try:
+        pin.resize(48, 48)
+        pin.show()
+        assert pin.begin_markup("pen") is True
+        assert pin._bar._tools["pen"].text() == "낙서"
+        pin._bar._tools["pen"].click()
+        pin._bar._widths[8].click()
+        assert pin._tool == "pen" and pin._width_preset == 8
+        monkeypatch.setattr(pin, "_ask_markup_color", lambda: QColor("#10FF20"))
+        assert pin.pick_markup_color() == "#10FF20"
+        assert pin._color == "#10FF20"
+        assert pin._bar._custom.isChecked()
+        assert pin._bar._custom.accessibleName() == "다른 색"
+        dlg = pin._markup_color_dialog(QColor("#10FF20"))
+        assert dlg.testOption(pc.QColorDialog.ColorDialogOption.DontUseNativeDialog)
+        assert dlg.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+        dlg.close()
+        pin.set_markup_color("not-a-color")
+        assert pin._color == "#10FF20"
+        pin._bar._colors["#E23B3B"].click()
+        assert pin._color == "#E23B3B"
+        assert pin._bar._custom.isChecked() is False
+
+        origin = pin.pos()
+        _press(pin, QPoint(6, 20))
+        _move(pin, QPoint(16, 22))
+        _move(pin, QPoint(30, 28))
+        _release(pin, QPoint(30, 28))
+        assert pin.pos() == origin
+        assert len(pin._marks) == 1
+        assert pin._marks[0].kind == "pen"
+        assert len(pin._marks[0].points) >= 3
+        assert pin._marks[0].width_px == pc.mark_width_px(8, 1.0)
+        assert pin._marks[0].color == "#E23B3B"
+        assert _rgb(pin.image_for_export(), 16, 22) != (255, 255, 255)
+        assert _rgb(pin.image_for_ocr(), 16, 22) == (255, 255, 255)
+        assert pin.undo_mark() is True
+        assert pin._marks == []
+        assert _rgb(pin.rendered_image(), 16, 22) == (255, 255, 255)
+        assert pin.redo_mark() is True
+        _key(pin, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        assert pin._marks == []
+
+        _press(pin, QPoint(10, 10))
+        _release(pin, QPoint(10, 10))
+        assert len(pin._marks) == 1
+        assert pin._marks[0].points
+        menu, acts = pin.build_menu()
+        assert acts["tools"]["pen"].text() == "낙서"
+        pin.apply_menu_action(acts["tools"]["pen"], acts)
+        assert pin._editing and pin._tool == "pen"
+        menu.close()
+    finally:
+        pin.close()
+
+    # A reloaded copy shares pixels but not cacheKey, so markup must reuse the pin.
+    src = _img(24, 16, "#336699")
+    src.setPixel(2, 2, QColor("white").rgb())
+    live = toolbar._make_pin(src, None)
+    copy = src.copy()
+    assert copy.cacheKey() != src.cacheKey()
+    toolbar._cur_img = copy
+    assert toolbar._pin_for_tool() is live
+
+
 def test_markup_hotkey_needs_a_pin(pc, toolbar):
     toolbar._on_hotkey("markup")
     assert "없어요" in toolbar._last_notice
